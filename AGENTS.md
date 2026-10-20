@@ -42,6 +42,7 @@
 ```bash
 pnpm install              # 安装依赖（再次强调：不要用 npm）
 pnpm serve                # 启动 qwenwork 网关（19067）
+pnpm log-in:qoder         # qoder 渠道凭据诊断（只读拾取 auth.v1.dat，不刷新不写回）
 pnpm serve:qoder          # 启动 qoder 网关（19070；需先登录 Qoder App）
 pnpm log-in               # 网页扫码登录（device flow，唯一凭据来源，无需 App）
 pnpm log-in --list-orgs   # 列企业组织及席位/套餐可用性（取 --team-id）
@@ -78,6 +79,7 @@ pnpm log-in --status      # 只读诊断：当前扣费身份与个人/企业双
 - 维护网页 device-flow 登录（PKCE / `deviceToken/poll`，见 `docs/specs/qwenwork-device-login.md`）
 - 维护扣费身份切换（`QWEN_IDENTITY=personal|biz`，见 `docs/DECISIONS.md` D-15）
 - 维护 qoder 通道的模型目录 / 展示名 / 请求差异（保持凭据只读）
+- 维护 qoder 渠道凭据诊断（`scripts/log-in-qoder.ts`，严禁引入刷新/写回）
 
 ## 目录速查
 - `src/index.ts` — qwenwork 入口：配置 + 启动
@@ -96,7 +98,8 @@ pnpm log-in --status      # 只读诊断：当前扣费身份与个人/企业双
 - `src/deviceLogin.ts` — 网页 device-flow 登录（PKCE + deviceToken/poll，无需 App）
 - `src/envStore.ts` — .env 安全读写单点（git-ignore 守卫 + 单行 upsert）
 - `src/signer.ts` — RSA_PKCS1 + AES 签名（逆向自 asar）
-- `scripts/log-in.ts` — pnpm log-in：网页扫码登录 + 扣费身份管理（`--list-orgs` / `--status` 为只读模式）
+- `scripts/log-in.ts` — pnpm log-in：qwenwork 渠道凭据入口（网页扫码登录 + 扣费身份管理；`--list-orgs` / `--status` 为只读模式）
+- `scripts/log-in-qoder.ts` — pnpm log-in:qoder：qoder 渠道凭据入口（只读诊断 App 登录态 + 模型列表，自带 mtime 只读自证）
 - `docs/PRD.md` — 产品需求文档
 - `docs/ARCHITECTURE.md` — 架构地图
 - `docs/DECISIONS.md` — 设计决策记录

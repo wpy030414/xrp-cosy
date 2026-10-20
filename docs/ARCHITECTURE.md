@@ -84,7 +84,8 @@ qoder:
   qoderAuth.ts ← qoderConfig.ts + safeStorage.ts
   qoderClient.ts ← qoderConfig.ts + qoderAuth.ts + forward.ts
 
-log-in.ts 脚本额外引 auth/client/deviceLogin/envStore
+log-in.ts（qwenwork）额外引 auth/client/deviceLogin/bizIdentity/envStore
+log-in-qoder.ts（qoder）额外引 qoderConfig/qoderAuth/qoderClient —— 只读，不写任何 App 文件
 ```
 
 ---

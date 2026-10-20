@@ -4,6 +4,7 @@
   "scripts": {
     "log-in": "tsx scripts/log-in.ts",
     "serve": "tsx src/index.ts",
+    "log-in:qoder": "tsx scripts/log-in-qoder.ts",
     "serve:qoder": "tsx src/qoderIndex.ts"
   },
   "dependencies": {

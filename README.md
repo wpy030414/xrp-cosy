@@ -23,7 +23,7 @@
 - 前置要求：Node.js ≥ 20、pnpm、xrl-router 运行在 `http://localhost:19068`
 - 安装步骤：`pnpm install`
 - qwenwork：`pnpm log-in`（网页扫码获取凭据）→ `pnpm serve`（端口 19067）
-- qoder：登录 Qoder App → `pnpm serve:qoder`（端口 19070；插件**只读** `auth.v1.dat`，不刷新、不写回）
+- qoder：登录 Qoder App → `pnpm log-in:qoder`（只读诊断凭据）→ `pnpm serve:qoder`（端口 19070；插件**只读** `auth.v1.dat`，不刷新、不写回）
 - qwenwork 扣费身份：`pnpm log-in --status` 查当前烧哪个积分池；切企业积分 `pnpm log-in --identity biz`（详见 `docs/DECISIONS.md` D-15）
 
 ## 当前状态

@@ -4,7 +4,7 @@
 
 不依赖千问办公桌面 App，通过「浏览器扫码 + 本地轮询」的 device flow 直接获取第一份 qwenwork 凭据（access token + refresh token），写入 `.env QWEN_KEYS` 后交由 [qwenwork-token](./qwenwork-token.md) 的刷新链自动续期喵～
 
-**入口**：`pnpm log-in`（`scripts/log-in.ts`）——qwenwork 渠道唯一的凭据入口，除登录外还含两个只读模式：`--status`（扣费身份与双池余额诊断）、`--list-orgs`（企业组织可用性）。千问办公 App 链路已取消支持（2026-10-20，见 `docs/DECISIONS.md` D-16）。
+**入口**：`pnpm log-in`（`scripts/log-in.ts`）——qwenwork 渠道唯一的凭据入口（qoder 渠道另有独立入口 `pnpm log-in:qoder`，只读拾取 App 登录态），除登录外还含两个只读模式：`--status`（扣费身份与双池余额诊断）、`--list-orgs`（企业组织可用性）。千问办公 App 链路已取消支持（2026-10-20，见 `docs/DECISIONS.md` D-16）。
 
 ## 协议来源
 
