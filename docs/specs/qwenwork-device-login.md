@@ -159,3 +159,16 @@ pnpm log-in --identity biz [--team-id <team_id>]     # 登录并当场派生 + �
 ```
 
 语义边界：**个人版是合法选择，不禁止**；仅 `biz` 模式铸造失败时报错，**绝不静默降级烧个人积分**。
+
+### `--status` 的副作用不对称（勿当纯只读）
+
+读企业池的前提是**持有企业凭据**，而派生它要调 `switch-team`——该接口会改动账号在服务端的
+当前 team 上下文。因此两个模式行为不同：
+
+| 配置 | 行为 | 网络调用 |
+|------|------|---------|
+| `QWEN_IDENTITY=personal` | 只读个人池；**默认不碰 switch-team**，要读企业池需显式 `--probe-biz` | identities + balance（纯只读） |
+| `QWEN_IDENTITY=biz` | 读双池必然派生企业凭据（`--probe-biz` 在此为空操作） | identities + **switch-team** + balance×2 |
+
+`biz` 模式的这点开销是必要的：派生成功与否本身就是「能否烧企业池」的判据，且服务端 team 上下文
+切到的正是配置里那个 team，与运行期签名所用完全一致。

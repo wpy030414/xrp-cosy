@@ -498,7 +498,7 @@ Router 对插件上游请求恒发占位值：`Authorization: Bearer xrl-router`
 | `QWEN_RSA_PUBLIC_KEY_PATH` | *(空，用内嵌公钥)* | RSA 公钥 PEM 文件路径（可选覆盖） |
 | `QWEN_REFRESH_INTERVAL_MS` | `600000` | token 自动刷新检查间隔（10min） |
 | `QWEN_TARGET` | `c` | deviceToken/refresh 的 target 参数（实测仅 `c` 合法，与扣费身份无关） |
-| `QWEN_IDENTITY` | `personal` | 扣费身份：`personal`=个人积分池（合法默认）/ `biz`=企业积分池 |
+| `QWEN_IDENTITY` | `personal` | 扣费身份：`personal`=个人积分池（合法默认）/ `biz`=企业积分池（`log-in --status` 在 biz 下会调 switch-team 派生凭据，非纯只读） |
 | `QWEN_BIZ_TEAM_ID` | *(空)* | 企业模式指定 team（空=自动挑 `active` + 有套餐的组织）；见 `pnpm log-in --list-orgs` |
 | `QWEN_WEB_BASE` | `https://qwenwork.cn` | 网站域 origin（账户/组织/余额 API；这些端点在 gateway 域 404） |
 | `QWEN_KEYS` | *(空)* | refresh token 当前值（`pnpm log-in` 备份，`getToken()` 自举源） |
