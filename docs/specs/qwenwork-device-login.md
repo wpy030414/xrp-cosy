@@ -154,7 +154,7 @@ Headers: Accept: application/json          # 必需
 pnpm log-in --list-orgs                              # 查可用企业组织（含 frozen/无套餐标记）
 pnpm log-in --identity biz [--team-id <team_id>]     # 登录并当场派生 + 校验企业身份
 # 扣费身份持久化在 .env：QWEN_IDENTITY=personal|biz（默认 personal）
-# 随时查看钱在烧哪个池：pnpm credits
+# 随时查看钱在烧哪个池：pnpm log-in --status
 ```
 
 语义边界：**个人版是合法选择，不禁止**；仅 `biz` 模式铸造失败时报错，**绝不静默降级烧个人积分**。

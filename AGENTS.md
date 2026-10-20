@@ -45,7 +45,7 @@ pnpm log-in               # 网页扫码登录（device flow，无需 App）
 pnpm log-in:app           # App 链路登录（解密 auth-v2.dat + 验证刷新链）
 pnpm log-in --list-orgs   # 列企业组织及席位/套餐可用性（取 --team-id）
 pnpm log-in --identity biz [--team-id <id>]   # 登录并派生+校验企业扣费身份
-pnpm credits              # 诊断：当前扣费身份与个人/企业双池余额
+pnpm log-in --status      # 诊断：当前扣费身份与个人/企业双池余额
 ```
 
 ### 已知限制（不要尝试修复）
