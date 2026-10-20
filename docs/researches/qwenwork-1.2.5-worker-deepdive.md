@@ -2,7 +2,7 @@
 
 > 承接 [`qwenwork-1.2.5-update.md`](./qwenwork-1.2.5-update.md)（2026-09-30：新挡位体系、WASM 签名链、503 卡点）。
 > 本会话通过 **`--inspect-brk` + CDP 运行时注入** 手段，彻底揭示了 **worker 的运行形态、通信协议全貌、job token 真实性**，
-> 并把 503 的根因收窄到「服务端侧状态判定」。**推理转发尚未打通**，未解点见 §6。
+> 并把 503 的根因收窄到「服务端侧状态判定」。**推理转发已于 2026-10-20 打通**（根因与消融见 §7）。
 
 ## 0. 一句话结论
 
@@ -13,7 +13,7 @@
 5. worker 的 HTTP 栈为 **undici**（bundle 自带副本）+ 自定义 Agent + **HTTPDNS**（`networkMode=httpdns`）；
 6. 推理前固定调用序列：**`GET /api/v1/userinfo` → `GET /api/v3/user/status` → `GET /api/v2/user/plan` → 推理**；
 7. 网关具备**反重放**：相同签名重发 → `{"code":"103","message":"Duplicate request"}`；
-8. **503 行为已收窄**：带 `Encode=1` 时服务端**成功解码请求体**、进入推理管线，卡在「查模型目录」——即**服务端侧对『本会话的模型目录』的判定**（App 可用 / 探针不可用，差异仍未知）。
+8. **503 根因（2026-10-20 结案）**：推理 body **缺少 `business` 字段**导致服务端「查模型目录」失败；补 `business: { product: "qoder_work" }` 即恢复 200，与 `Encode=1` / WASM 签名链无关（见 §7）。
 
 ## 1. 重大发现详解
 
@@ -188,6 +188,8 @@ worker 每次「用户轮次」的标准调用序列：
 
 ## 4. 503 状态的最终理解
 
+> **后续（2026-10-20）已定位根因并修复：见 §7。根因是请求体缺少 `business` 字段，与签名链/Encode=1 无关。**
+
 **已排除**（硬证据）：
 
 - ❌ token 差异（逐字节相同）
@@ -217,6 +219,70 @@ worker 每次「用户轮次」的标准调用序列：
    - 对 `userinfo/status/plan` 前置序列做**补调对照**；
    - 对官方 WASM 的 `prepareInferRequest` 输入**逐字段消融**。
 3. **对插件的意义**：token 与签名链均无问题，**若最终确认 503 依赖「服务端目录注册状态」**，则插件侧需在推理前**补齐对应前置调用**（或适配 Encode=1 链）。
+
+---
+
+## 7. 结案（2026-10-20）：503 根因 = body 缺 `business`
+
+### 7.1 发现路径
+
+重读 App 主进程 `HostDirectModelClient` 的真实请求构造（`buildHostDirectAgentChatRequest`，app.asar 偏移 ~216703836），对照其成功日志（`prompt_suggestion`，NativeInferAPI 200），发现其 body 与本探针的 worker body 存在一个此前被忽略的结构差异：
+
+```js
+{
+  request_id, session_id, version, agent_id,
+  model_config: { key, source: "system" },
+  custom_system_role_content, messages, parameters, tools,
+  business: { id, name, begin_at, product: "qoder_work", version, type: "agent", stage: "processing", sub_task }
+}
+```
+
+用该 body 原样重放 → **内层 200 且正常出流**，503 消失。
+
+### 7.2 单变量消融（以可用的 aux body 为基线）
+
+| 变体 | 内层结果 |
+|------|----------|
+| 基线（含 `business`） | **200** |
+| 删除 `business` | **503 Model catalog unavailable** |
+| `business` 只留 `{ product: "qoder_work" }` | **200** |
+| 只留 `{ product, type: "agent" }` | **200** |
+| 删除 `business.name/sub_task/stage/version/id/begin_at` | 均 **200** |
+| 增加 `stream` / `chat_task` / `chat_context` / `chat_record_id` / `request_set_id` / 完整 `model_config` | 均 **200** |
+| 删除 `x-model-key` 头 | 内层 **403 Model is not available for this user** |
+| 删除 body 的 `model` 字段（保留 `x-model-key`） | **200** |
+
+结论：
+- **`business.product` 是唯一的目录定位开关**；`business` 其余字段均可省略；
+- `x-model-key` 是挡位选择的必需头（缺失 → 403），与 `model` 字段无关；
+- `Encode=1` / WASM 加密体 / WASM 签名链**都不是必需条件**。
+
+### 7.3 跨签名链验证（关键反证）
+
+用插件现有的**旧 MD5 Cosy 签名链**（`src/signer.ts`，cosyVersion 1.0.0 + `Cosy-Version: 1.1.59`）直接发请求：
+
+| body | 内层结果 |
+|------|----------|
+| 插件原 body（`model`/`messages`/`stream`/`request_id`/`session_id`） | **503 Model catalog unavailable** |
+| 同上 + `business: { product: "qoder_work" }` | **200**（流式正常） |
+| worker 完整 body + business（明文，无 `Encode=1`） | **200** |
+| 极简 body + business（`request_id`/`session_id`/`agent_id`/`model_config`/`custom_system_role_content`/`messages`/`parameters`） | **200** |
+
+说明：1.2.5 更新记录中「官方 WASM 链仍 503」的实验同样缺 `business`，因此指向了错误的适配方向；真正的阻塞点一直是目录字段。
+
+### 7.4 落地与验证
+
+- `src/client.ts`：`forwardBody` 缺省补 `business: { product: 'qoder_work' }`（调用方已有则保留）；
+- `scripts/probe-models.ts`：诊断 body 同步补 `business`；
+- 端到端（插件 `/v1/chat/completions`）：
+  - 非流式：`flash` 返回完整 `chat.completion`（含 `reasoning_content`、usage）；
+  - 流式 tool_calls：`pro` 正确输出首 chunk `id/name` + arguments 分片，`finish_reason: "tool_calls"`；
+  - `flash` / `pro` / `qwen3.8-max-preview` 三挡均 200 出流（上游统一标识 `qwork-openai-chat-mode-pool`）。
+
+### 7.5 备注
+
+- 旧挡位名（`qwork-advanced`/`qwork-auto`）带上 `x-model-key` 后同样能 200，说明服务端对未知 key 可能回落到默认池；挡位可用性不能仅凭 HTTP/内层状态判断。
+- `business` 是服务端日志/统计维度，保留 `product` 即可满足目录定位；插件不再需要引入官方 WASM（289KB）或 Encode=1 流加密。
 
 ---
 

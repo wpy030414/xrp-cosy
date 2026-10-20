@@ -2,6 +2,10 @@
 
 > 上游大版本更新（App 0.1.3 → 1.2.5）的完整逆向记录：新挡位体系、推理协议变化、WASM 签名链，
 > 以及可复现的调试方法论。本文承接 [`qwenwork-desktop-reverse.md`](./qwenwork-desktop-reverse.md)（0.1.3 基线）。
+>
+> **后续结论（2026-10-20）**：503「Model catalog unavailable」的根因已定位为 **推理 body 缺少 `business` 字段**，
+> 与 WASM 签名链 / `Encode=1` 无关；旧明文 MD5 Cosy 链继续可用。结案记录见
+> [`qwenwork-1.2.5-worker-deepdive.md`](./qwenwork-1.2.5-worker-deepdive.md) §7。
 
 ## 0. 一句话结论
 
@@ -171,11 +175,10 @@ legacy body 结构（WASM 输入侧，非 OpenAI 格式）：
 - ✅ **已适配**：新挡位默认值（`AVAILABLE_MODELS=flash,pro,qwen3.8-max-preview`）、`DISPLAY_NAMES`
   （Standard/Pro/Qwen3.8-Max）、静态头（`Cosy-Version: 1.1.59`、`Cosy-MachineOs` 按平台生成）、
   `x-model-key` 头、目录接口 `fetchModelCatalog()`、诊断脚本 `scripts/probe-models.ts`；
-- ⏳ **待完成**：推理转发的新版 WASM 签名链（`Encode=1` 加密体）——完成前推理请求会被服务端 503；
-- 适配路径建议（优先级序）：
-  1. 用官方 WASM 作为「预言机」逐项补齐差异（对比 App 真实请求的完整字节）；
-  2. 抓取一次 App 真实推理的完整请求（需临时对 worker 做流量观察）；
-  3. 跟进 §6 未解点。
+- ✅ **推理转发已打通（2026-10-20）**：无需 WASM / `Encode=1`，只需在 body 补
+  `business: { product: 'qoder_work' }`；旧 MD5 Cosy 明文签名链实测 200 出流，三挡均可用。
+  结案与消融证据见 [`qwenwork-1.2.5-worker-deepdive.md`](./qwenwork-1.2.5-worker-deepdive.md) §7。
+- 原「待完成」的 WASM 签名链适配已不再需要。
 
 ---
 

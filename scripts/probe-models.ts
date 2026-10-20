@@ -5,9 +5,9 @@
  * 本脚本以「明文 body + `x-model-key` 头」逐挡位发极小的流式请求，打印响应头与首个 chunk 的内层
  * 状态，用于快速判断挡位可用性与上游协议状态。
  *
- * 注意：新版官方客户端请求带 `&Encode=1`（body 由官方 WASM 生成流加密体），本脚本发明文 body 探测，
- * 因此不带 Encode=1——用于观察服务端对明文请求的处理（403 挡位未知 / 503 目录不可用）。
- * 完整新协议逆向记录见 docs/researches/qwenwork-1.2.5-update.md。
+ * 关键：body 必须带 `business: { product: 'qoder_work' }` —— 新版网关靠它定位模型目录，
+ * 缺失时内层返回 503「Model catalog unavailable」（与签名链、Encode=1 无关；见
+ * docs/researches/qwenwork-1.2.5-worker-deepdive.md §7）。
  *
  * 用法：pnpm tsx scripts/probe-models.ts [model1 model2 ...]（缺省探测新三挡 + 旧挡位对照）
  */
@@ -42,7 +42,7 @@ const DEFAULT_CANDIDATES = [
   'flash',
   'pro',
   'qwen3.8-max-preview',
-  // 旧挡位（应全部 403 —— 仅作对照）
+  // 旧挡位（新版可能被服务端忽略/回落默认池——仅作对照，不能单凭 200 判定可用）
   'qwork-advanced',
   'qwork-auto',
 ];
@@ -56,6 +56,7 @@ async function probe(model: string): Promise<void> {
     max_tokens: 8,
     request_id: randomUUID(),
     session_id: randomUUID(),
+    business: { product: 'qoder_work' },
   });
 
   const material = buildSignMaterial(token);

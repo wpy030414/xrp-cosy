@@ -305,7 +305,7 @@ x-model-key:   {model_id}
 + 12 个静态头（10 个 Cosy-* + Login-Version + x-model-source）
 ```
 
-**请求体**：明文 JSON（**不**使用 `Encode=1`），自动补 `request_id` / `session_id`（UUID），删除 `encode` / `extra_body` 字段。
+**请求体**：明文 JSON（**不**使用 `Encode=1`），自动补 `request_id` / `session_id`（UUID）与 `business: { product: 'qoder_work' }`（新版网关定位模型目录的必需字段，缺失会返回 503 `Model catalog unavailable`），删除 `encode` / `extra_body` 字段。
 
 **响应**：
 

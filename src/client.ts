@@ -5,7 +5,7 @@
  *  1. 取 OAuth token（自动刷新）
  *  2. encryptUserInfo → cosy-key / info（每请求新 16B AES key）
  *  3. generateAuthToken → authorization（md5 绑定 body/path/时间戳，天然防重放）
- *  4. body 明文透传（去 Encode=1；必需 request_id/session_id 自动补）
+ *  4. body 明文透传（去 Encode=1；必需 request_id/session_id/business 自动补）
  *  5. 流式/非流式透传
  */
 
@@ -127,8 +127,8 @@ export async function forwardChatCompletions(
   authHeader?: string,
 ): Promise<void> {
   // 2026-09 新版挡位（见 /api/v2/model/list）：flash（标准）/ pro（高级）/ qwen3.8-max-preview，默认 flash喵
-  // TODO(推理适配)：新版要求 `Encode=1`（body 由官方 WASM 生成签名与流加密），当前明文签名链会被
-  // 服务端以 503「Model catalog unavailable」拒绝；待新版 WASM 签名链逆向完成后补齐，目录接口已可用。
+  // 注意：新版网关（1.2.5+）缺少 `business.product` 时会以 503「Model catalog unavailable」拒绝，
+  // 补上 `business: { product: 'qoder_work' }` 后旧明文签名链（MD5 Cosy）仍然可用，无需 Encode=1 / WASM。
   const model = body.model || 'flash';
   const isStream = body.stream === true;
 
@@ -168,11 +168,13 @@ export async function forwardChatCompletions(
   }
 
   // body：明文透传 + 补 request_id/session_id
+  // business 是网关定位模型目录的必需字段（缺省 → 503 Model catalog unavailable）
   const forwardBody: any = {
     ...body,
     model,
     request_id: body.request_id || randomUUID(),
     session_id: body.session_id || randomUUID(),
+    business: body.business || { product: 'qoder_work' },
   };
 
   // 去掉可能带入的 Encode=1 相关字段（qwenwork 网关明文即可）

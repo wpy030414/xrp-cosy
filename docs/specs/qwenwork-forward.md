@@ -22,9 +22,10 @@
 3. **模型默认（2026-09 新版）**：客户端未指定 `model` 时使用 `flash`；指定了什么就透传什么（无别名映射）。默认挡位列表：`flash`、`pro`、`qwen3.8-max-preview`（云端权威目录见 `GET /api/v2/model/list`，插件可用 `fetchModelCatalog()` 拉取）
 4. **Body 清洗**：`delete forwardBody.encode`、`delete forwardBody.extra_body`（qwenwork 网关明文即可，不需要 Encode=1）
 5. **自动填充**：`request_id` 和 `session_id` 缺失时用 `randomUUID()` 补全
-6. **Cosy 静态头**：12 个头（`Cosy-Business-Product: qoder_work`、`Cosy-Scene: qwork`、`Cosy-Version: 1.1.59`、`Cosy-MachineOs: ${arch}_${platform}` 按平台生成 等；其中 `Login-Version`、`x-model-source` 非 `Cosy-*` 前缀）
-7. **推理路径**：`/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common`（2026-09 新版官方客户端另带 `&Encode=1`，body 为 WASM 流加密体——待适配，见「已知边界」）
-8. **挡位头（2026-09 新版）**：挡位经 `x-model-key` 请求头传递（值 = 目录 key，如 `flash`），body.model 不再用于服务端路由
+6. **business 必填（2026-09 新版）**：body 缺失 `business.product` 时网关内层返回 503「Model catalog unavailable」；插件缺省补 `business: { product: 'qoder_work' }`（调用方自带 `business` 时原样保留）
+7. **Cosy 静态头**：12 个头（`Cosy-Business-Product: qoder_work`、`Cosy-Scene: qwork`、`Cosy-Version: 1.1.59`、`Cosy-MachineOs: ${arch}_${platform}` 按平台生成 等；其中 `Login-Version`、`x-model-source` 非 `Cosy-*` 前缀）
+8. **推理路径**：`/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common`（官方客户端另带 `&Encode=1` + WASM 流加密体；网关同样接受明文 JSON，插件不需要 Encode=1 / WASM）
+9. **挡位头（2026-09 新版）**：挡位经 `x-model-key` 请求头传递（值 = 目录 key，如 `flash`）；缺失该头内层返回 403「Model is not available for this user」
 
 **SSE 双层解包：**
 - 外层格式：`data:{"headers":{...},"body":"<内层 OpenAI chunk JSON>","statusCodeValue":200}`
@@ -53,10 +54,11 @@
 - [ ] `model` 字段透传：客户端指定什么就发什么，缺省时默认 `flash`
 - [ ] body 中 `encode` / `extra_body` 字段被删除，不透传
 - [ ] 缺失 `request_id` / `session_id` 自动补全 UUID
+- [ ] 缺失 `business` 时自动补 `{ product: 'qoder_work' }`（不覆盖调用方自带值）
 
 ## 已知边界
 
-- **2026-09-30 上游大版本更新（App 1.2.5）**：旧四挡下线，新挡位为 `flash`/`pro`/`qwen3.8-max-preview`（`GET /api/v2/model/list` 下发）；推理协议改为 `x-model-key` 请求头 + `Encode=1`（官方 WASM 流加密 body）。**当前推理转发仍为旧明文签名链，会被服务端 503「Model catalog unavailable」拒绝——推理适配未完成**（目录接口已可用）。完整逆向见 [`docs/researches/qwenwork-1.2.5-update.md`](../researches/qwenwork-1.2.5-update.md)
+- **2026-09-30 上游大版本更新（App 1.2.5）已适配**：旧四挡下线，新挡位为 `flash`/`pro`/`qwen3.8-max-preview`（`GET /api/v2/model/list` 下发）；推理请求需带 `x-model-key` 头与 `business.product`。此前记录的 503「Model catalog unavailable」**根因是 body 缺少 `business` 字段**（非签名链/Encode=1）——补齐后旧 MD5 Cosy 明文签名链继续可用，无需 WASM。完整逆向与消融实验见 [`docs/researches/qwenwork-1.2.5-worker-deepdive.md`](../researches/qwenwork-1.2.5-worker-deepdive.md)
 - 上游 qwenwork 网关自身会发 `[DONE]` 和空 `{}`，流式路径 `emitChunk` 和非流式路径均显式跳过这两类，流式由本服务发出唯一的 `[DONE]` 喵
 - `extractUidFromToken` 容错：JWT payload 中尝试 `sub` → `uid` → `user_id`，都无则返回空字符串
 - 上游非 2xx：直接透传 status code + body 文本（不做二次包装）
