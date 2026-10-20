@@ -514,7 +514,10 @@ Router 对插件上游请求恒发占位值：`Authorization: Bearer xrl-router`
 | `QWEN_USER_DATA_DIR` | `%APPDATA%/QwenWorkCN` 等 | Electron userData 目录（Windows 读 Local State 的 os_crypt 密钥） |
 | `QWEN_RSA_PUBLIC_KEY_PATH` | *(空，用内嵌公钥)* | RSA 公钥 PEM 文件路径（可选覆盖） |
 | `QWEN_REFRESH_INTERVAL_MS` | `600000` | token 自动刷新检查间隔（10min） |
-| `QWEN_TARGET` | `c` | deviceToken/refresh 的 target 参数 |
+| `QWEN_TARGET` | `c` | deviceToken/refresh 的 target 参数（实测仅 `c` 合法，与扣费身份无关） |
+| `QWEN_IDENTITY` | `personal` | 扣费身份：`personal`=个人积分池（合法默认）/ `biz`=企业积分池 |
+| `QWEN_BIZ_TEAM_ID` | *(空)* | 企业模式指定 team（空=自动挑 `active` + 有套餐的组织）；见 `pnpm log-in --list-orgs` |
+| `QWEN_WEB_BASE` | `https://qwenwork.cn` | 网站域 origin（账户/组织/余额 API；这些端点在 gateway 域 404） |
 | `QWEN_KEYS` | *(空)* | 灾备 refresh token（`pnpm log-in` / `pnpm log-in:app` 备份的当前值） |
 | `QWEN_MACHINE_ID`（.env 行） | 自动生成 | device-flow 设备标识（`pnpm log-in` 首跑写入） |
 

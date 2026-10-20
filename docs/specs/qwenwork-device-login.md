@@ -130,3 +130,31 @@ Headers: Accept: application/json          # 必需
 - refresh token 绝对过期：poll/refresh 响应可能返回 `refresh_token_expires_at`（auth.ts 会跟踪并在 <24h 时告警）；缺失时未知不猜，过期后重跑 `pnpm log-in` 即可
 - `machine_id` 丢失（删 .env）→ 下次生成新 UUID，服务端视为新设备，无害
 - Windows 上 `.env` 的 mode 600 为尽力语义（NTFS 无完整 POSIX 位），macOS/Linux 为真 600
+
+---
+
+## 7. 扣费身份：设备流凭据 ≠ 企业身份（2026-10-20 实测）
+
+设备流铸出的 access token **恒为个人身份**（`is_biz=false`、`sub` 属 c_site 身份体）。
+身份**无法从登录 URL 注入**：`selectAccounts` 的 query 与 `redirect_uri` 均为白名单精确校验，
+多带任何参数一律 `400 INVALID_DEVICE_FLOW`；SPA 的 `space`/`corpId` 只作用于网页会话，不回流凭据。
+
+企业积分靠**派生凭据**获得（见 `docs/DECISIONS.md` D-15）：
+
+```
+根凭据（c_site access token）
+  → POST {QWEN_WEB_BASE}/biz/user/v1/auth/switch-team  {org_id, team_id}
+  → Set-Cookie: token=<biz JWT>   aud=biz · biz_org_id · 约 15 天
+  → 作为 security_oauth_token 参与 cosy 签名（uid 换为企业身份体 sub）
+```
+
+判据（唯一硬证据是双池余额差，不能用请求成功与否判断）：
+
+```bash
+pnpm log-in --list-orgs                              # 查可用企业组织（含 frozen/无套餐标记）
+pnpm log-in --identity biz [--team-id <team_id>]     # 登录并当场派生 + 校验企业身份
+# 扣费身份持久化在 .env：QWEN_IDENTITY=personal|biz（默认 personal）
+# 随时查看钱在烧哪个池：pnpm credits
+```
+
+语义边界：**个人版是合法选择，不禁止**；仅 `biz` 模式铸造失败时报错，**绝不静默降级烧个人积分**。

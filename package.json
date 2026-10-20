@@ -5,7 +5,8 @@
     "log-in": "tsx scripts/log-in.ts",
     "log-in:app": "tsx scripts/log-in-app.ts",
     "serve": "tsx src/index.ts",
-    "serve:qoder": "tsx src/qoderIndex.ts"
+    "serve:qoder": "tsx src/qoderIndex.ts",
+    "credits": "tsx scripts/credits.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.8",

@@ -43,6 +43,9 @@ pnpm serve                # 启动 qwenwork 网关（19067）
 pnpm serve:qoder          # 启动 qoder 网关（19070；需先登录 Qoder App）
 pnpm log-in               # 网页扫码登录（device flow，无需 App）
 pnpm log-in:app           # App 链路登录（解密 auth-v2.dat + 验证刷新链）
+pnpm log-in --list-orgs   # 列企业组织及席位/套餐可用性（取 --team-id）
+pnpm log-in --identity biz [--team-id <id>]   # 登录并派生+校验企业扣费身份
+pnpm credits              # 诊断：当前扣费身份与个人/企业双池余额
 ```
 
 ### 已知限制（不要尝试修复）
@@ -69,6 +72,7 @@ pnpm log-in:app           # App 链路登录（解密 auth-v2.dat + 验证刷新
 - 优化 WebSocket 重连策略
 - 新增模型展示名（`DISPLAY_NAMES`）
 - 维护网页 device-flow 登录（PKCE / `deviceToken/poll`，见 `docs/specs/qwenwork-device-login.md`）
+- 维护扣费身份切换（`QWEN_IDENTITY=personal|biz`，见 `docs/DECISIONS.md` D-15）
 - 维护 App 链路登录诊断（`scripts/log-in-app.ts`）
 - 维护 qoder 通道的模型目录 / 展示名 / 请求差异（保持凭据只读）
 
@@ -83,6 +87,7 @@ pnpm log-in:app           # App 链路登录（解密 auth-v2.dat + 验证刷新
 - `src/client.ts` — qwenwork 通道差异：静态头、business、展示名、灾备 refresh
 - `src/qoderClient.ts` — qoder 通道差异：静态头、business、`agent_id`、展示名
 - `src/auth.ts` — qwenwork token 管理（刷新 + 文件监听 + 三源 fallback + adoptCredential）
+- `src/bizIdentity.ts` — 企业身份派生（switch-team 铸 biz JWT + 缓存续期 + 双池余额判据）
 - `src/qoderAuth.ts` — qoder token 管理（只读 + 文件监听，不刷新不写回）
 - `src/safeStorage.ts` — Electron safeStorage 解密/加密（Keychain / DPAPI）
 - `src/deviceLogin.ts` — 网页 device-flow 登录（PKCE + deviceToken/poll，无需 App）

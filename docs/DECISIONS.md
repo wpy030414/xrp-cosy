@@ -3,7 +3,7 @@
 > 本文件记录项目关键设计决策背后的**历史原因**，防止架构漂移。
 > 每条决策回答的是「为什么」而非「怎么做」。
 
-版本：0.5.0 | 最后更新：2026-09-30
+版本：0.6.0 | 最后更新：2026-10-20
 
 ---
 
@@ -185,6 +185,39 @@
 - `src/config.ts`（无 deap 配置、无 Channel 类型）
 - `package.json`（无 express/cors，有 hono/@hono/node-server，有 login 脚本）
 - 删除文件：`src/channel.ts`、`src/wukong/`、`scripts/wukong/`、相关 docs
+
+## D-15: 为什么企业积分靠 switch-team 派生，而不是在登录 URL 上选企业版？
+
+**背景**：训练员反馈「网页登录后烧的是个人版积分，不是企业版」。网页登录页（`/biz/signin`）确实有企业/个人可选，
+官方 CLI 也确实拿到过企业身份（`~/.qwenworkcn/.status.json`：`user_type=enterprise`、`plan=企业基础版`）。
+
+**问题**：
+- 设备流铸出的 access token **恒为个人身份**：`is_biz=false`、`sub=e549d75e-…`（c_site），而企业身份体是**另一个 user_id**（`f644d61f-…`）——不是同一账号加标签，是两套账号体
+- 曾假设「登录 URL 带 `space=org&corpId` 即可」，**被实验否证**：`selectAccounts` 的 query 与 `redirect_uri` 都是白名单精确校验，多带任何参数（space/type/org_id/corpId/target/login_hint…）一律 `400 INVALID_DEVICE_FLOW`，实测 15 个候选参数全军覆没
+- 网页 SPA 的 `space`/`corpId`（bundle：`pte()`/`mq()`/`CGt()`）只作用于**网页会话自身**，不回流到设备流凭据；且产品内置「企业无席位 → 自动切回个人」（埋点 `qwenwork_enterprise_no_seat_guide.auto_switch_personal_triggered`）
+- `QWEN_TARGET` 换不掉身份：实测 `target` 仅 `c` 合法，`b`/`org`/`e` 一律 `400 INVALID_REFRESH_REQUEST`
+
+**决策**：企业身份作为**派生凭据**，而非登录期凭据——用设备流根凭据（恒 c_site）调
+`POST {qwenWebBase}/biz/user/v1/auth/switch-team`（body 需 `team_id`），从响应的 `Set-Cookie: token=<JWT>`
+取回企业 JWT（`aud=biz`、`biz_org_id`、约 15 天有效），直接充当 cosy 签名链的 `security_oauth_token`，
+并把 `Cosy-User`/`info.uid` 换成企业身份体的 `sub`。配置项 `QWEN_IDENTITY=personal|biz`（默认 personal）。
+
+**关键取舍**：
+- **个人版是合法选择，不禁止**：默认 personal 直接走根凭据，行为与历史完全一致；只有 `biz` 才派生企业凭据
+- **绝不静默降级**：`biz` 模式下铸造失败一律抛错并禁掉 `fallbackAuth`（否则「以为在烧企业、实际在烧个人」——正是本次事故本身）
+- **不发 `Cosy-Organization-Id` 头**：消融矩阵实测 biz token 不带该头才走对模型池（带上的 B2 退化为空 delta）；身份完全由 JWT 承载
+- **缓存按根凭据 sub 分键**：换账号（重跑 log-in）自动重铸，避免把 A 的企业身份用到 B 上
+
+**证据**（2026-10-20 端到端实测，双池余额对比为硬判据）：
+
+| 模式 | 个人池 Δ | 企业池 Δ | 结果 |
+|---|---|---|---|
+| `QWEN_IDENTITY=biz` | **0** | **-0.002** | HTTP 200 正常回复 |
+| `QWEN_IDENTITY=personal` | -0.0017 | **0** | 与上行构成双向对照 |
+| `biz` + 不存在 team_id | **0** | — | HTTP 401 明确报错，未降级 |
+
+**实现**：`src/bizIdentity.ts`（mint/getBizToken/fetchBalance）· `src/client.ts`（`getSigningToken`）·
+`scripts/log-in.ts`（`--identity biz [--team-id]` / `--list-orgs`）
 
 ---
 

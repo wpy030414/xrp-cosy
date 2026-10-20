@@ -42,6 +42,34 @@ export interface DeviceLoginHandles {
   machineId: string;
 }
 
+/** 设备流凭据的身份声明（决定服务端把消耗记到哪个账上） */
+export interface CredentialIdentity {
+  /** JWT `is_biz`：true = 企业身份体（biz），false = 个人身份体（c_site） */
+  isBiz: boolean;
+  /** JWT `sub`：身份体自身的 user_id（个人与企业是两个不同的 id） */
+  sub: string;
+  username: string;
+  /** 解析失败（非 JWT / 无 payload）时为 true，调用方应降级为「无法判定」而非报错 */
+  undecodable: boolean;
+}
+
+/** 解 access token 的身份 claims（设备流凭据的身份在铸造那一刻写死，刷新只换血不换人） */
+export function readCredentialIdentity(token: string): CredentialIdentity {
+  const empty = { isBiz: false, sub: '', username: '', undecodable: true };
+  try {
+    const part = token.split('.')[1] || '';
+    const p = JSON.parse(Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+    return {
+      isBiz: p.is_biz === true,
+      sub: String(p.sub ?? p.user_id ?? ''),
+      username: String(p.username ?? ''),
+      undecodable: false,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 export interface DeviceFlowCredential {
   /** OAuth access token（JWT，~1h） */
   token: string;
@@ -95,7 +123,16 @@ export function buildDeviceLoginParams(repoRoot?: string): DeviceLoginHandles {
   };
 }
 
-/** 拼登录页 URL（浏览器打开 → 钉钉扫码） */
+/**
+ * 拼登录页 URL（浏览器打开 → 钉钉扫码）。
+ *
+ * 身份注入点（逆向 + 实测）：
+ * - `selectAccounts` 的 query 与 `redirect_uri` 都是**白名单精确校验**：实测多带任何参数
+ *   （space/corpId/target/login_hint 或 redirect_uri 挂 query）一律 `400 INVALID_DEVICE_FLOW`；
+ * - 该跳 302 → `/oauth2/auth`（Hydra）→ `/biz/signin?login_challenge=…`，**落地页才是 SPA 所在**；
+ * - SPA 的 `space`/`corpId` 只作用于网页会话，**不会回流到设备流凭据**；
+ *   企业身份改由 `src/bizIdentity.ts` 在签名侧用 switch-team 派生铸造。
+ */
 export function buildAuthUrl(h: DeviceLoginHandles, loginHint?: string): string {
   const u = new URL('/device/selectAccounts', settings.qwenAuthBase);
   u.searchParams.set('challenge', h.challenge);
@@ -219,7 +256,7 @@ export async function pollDeviceFlow(
   throw new DeviceFlowError(`${Math.round(timeoutMs / 1000)} 秒内未完成登录，可重跑 pnpm log-in${hint}`, lastStatus);
 }
 
-/** 组合流：生成参数 → 回调 authUrl（打印/开浏览器）→ 轮询 */
+/** 组合流：生成参数 → 解析落地页并按所选身份拼 URL → 开浏览器 → 轮询 */
 export async function runDeviceLogin(
   opts: {
     loginHint?: string;

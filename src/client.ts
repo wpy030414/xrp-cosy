@@ -13,7 +13,8 @@
 
 import { settings } from './config';
 import { getToken, refreshDeviceToken, type QwenTokenState } from './auth';
-import { buildSignMaterial, buildAuthHeaders } from './signer';
+import { getBizToken } from './bizIdentity';
+import { buildSignMaterial, buildAuthHeaders, type SignToken } from './signer';
 import { forwardChatCompletionsGeneric } from './forward';
 
 /**
@@ -111,6 +112,26 @@ const COSY_STATIC_HEADERS: Record<string, string> = {
   'x-model-source': 'system',
 };
 
+/**
+ * 取用于 cosy 签名的凭据，按 settings.qwenIdentity 决定扣费身份：
+ * - `personal`（默认）：直接用设备流根凭据（c_site，烧个人积分）——主人主动选个人，完全合法。
+ * - `biz`：用根 access token 调 switch-team 派生企业 JWT（aud=biz，约 15 天），
+ *   并以**企业身份体的 sub** 作为 Cosy-User / info.uid —— 实测身份完全由 JWT 承载，
+ *   加 `Cosy-Organization-Id` 头反而会让网关打歪路由（消融矩阵 B2 退化为空 delta），故不发该头。
+ *
+ * 失败语义：**企业模式铸造失败一律抛错**，绝不回退个人凭据 —— 静默降级会让主人
+ * 以为在烧企业池、实际在烧个人池，这正是本次事故本身。
+ */
+export async function getSigningToken(): Promise<SignToken> {
+  const root = await getToken();
+  if (settings.qwenIdentity !== 'biz') return root;
+  const { biz } = await getBizToken(root.token, settings.qwenBizTeamId || undefined);
+  return {
+    token: biz.jwt,
+    user: { uid: biz.claims.sub, name: biz.claims.username, email: root.user?.email },
+  };
+}
+
 const INFER_PATH = '/algo/api/v2/service/pro/sse/agent_chat_generation';
 const INFER_QUERY = '?FetchKeys=llm_model_result&AgentId=agent_common';
 
@@ -139,19 +160,24 @@ export async function forwardChatCompletions(
     product: 'qoder_work',
     defaultModel: 'flash',
     modelHeaderName: 'x-model-key',
-    getToken,
-    fallbackAuth: async (h) => {
-      const rt = extractRefreshToken(h);
-      if (!rt) return null;
-      const token: QwenTokenState = await refreshDeviceToken(rt);
-      token.user = { uid: extractUidFromToken(token.token) };
-      return token;
-    },
+    // 企业模式下的凭据失效（biz JWT 过期/席位变更）必须显式失败，不能降级烧个人池
+    getToken: getSigningToken,
+    fallbackAuth: settings.qwenIdentity === 'biz'
+      ? undefined
+      : async (h) => {
+          const rt = extractRefreshToken(h);
+          if (!rt) return null;
+          const token: QwenTokenState = await refreshDeviceToken(rt);
+          token.user = { uid: extractUidFromToken(token.token) };
+          return token;
+        },
     ensureUid: (token) => {
       if (!token.user?.uid) {
         token.user = { ...token.user, uid: extractUidFromToken(token.token) };
       }
     },
-    authErrorMessage: '无可用 token 源（请确保千问办公 App 已登录）',
+    authErrorMessage: settings.qwenIdentity === 'biz'
+      ? '企业身份凭据不可用（QWEN_IDENTITY=biz）——已拒绝降级到个人积分，请检查组织席位/套餐或重跑 pnpm log-in'
+      : '无可用 token 源（请确保千问办公 App 已登录）',
   });
 }
