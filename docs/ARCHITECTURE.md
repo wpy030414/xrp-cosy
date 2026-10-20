@@ -1,6 +1,6 @@
 # ARCHITECTURE.md — xrl-router-plugin-qwenwork 架构地图
 
-> Version: 0.5.0 | Last updated: 2026-09-30
+> Version: 0.6.0 | Last updated: 2026-10-20
 >
 > 本文档描述稳定的结构关系，半年至一年不变。代码改动若偏离此处描述，需同步更新。
 
@@ -10,22 +10,25 @@
 
 ```
 ┌────────────┐     OpenAI API      ┌──────────────┐    WS register    ┌──────────────────────────┐
-│  Client    │ ──────────────────> │  xrl-router  │ ────────────────> │ xrl-router-plugin-       │
-│ (Claude    │  /v1/chat/          │  (路由/密钥/  │  (V24 契约，      │ qwenwork (Hono 网关)     │
-│  Code etc) │  completions        │   重试)       │   占位凭证)       │                          │
+│  Client    │ ──────────────────> │  xrl-router  │ ────────────────> │ plugin-qwenwork (Hono)   │
+│ (Claude    │  /v1/chat/          │  (路由/密钥/  │  (V24 契约，      │  :19067                  │
+│  Code etc) │  completions        │   重试)       │   占位凭证)       ├──────────────────────────┤
+│            │                     │              │                   │ plugin-qoder (Hono)      │
+│            │                     │              │                   │  :19070                  │
 └────────────┘                     └──────────────┘                   └───────────┬──────────────┘
                                                                                   │
-                                                                     OAuth+Cosy签名
-                                                                     SSE 外层解包
+                                                                   Cosy 签名 + SSE 外层解包
                                                                                   │
-                                                                     ┌────────────▼────────────┐
-                                                                     │ gateway.qwenwork.cn     │
-                                                                     │ → 智谱 GLM-5.2          │
-                                                                     │   Qwen3.7-plus          │
-                                                                     │   DeepSeek-V4-flash     │
-                                                                     │   Qwen3.8-max           │
-                                                                     └─────────────────────────┘
+                                      ┌───────────────────────────────────────────┴─────────────┐
+                                      ▼                                                         ▼
+                        ┌────────────────────────────┐                            ┌────────────────────────────┐
+                        │ gateway.qwenwork.cn        │                            │ api3.qoder.sh              │
+                        │ → Standard / Pro           │                            │ → Qwen3.8-Flash            │
+                        │   Qwen3.8-Max              │                            │   DeepSeek-Flash           │
+                        └────────────────────────────┘                            └────────────────────────────┘
 ```
+
+两个通道是**独立进程、独立插件注册**，共享同一套签名/转发/服务骨架；上游协议同族，仅 host、`business.product`、`agent_id` 与账号体系不同。
 
 ### 设计原则
 
@@ -35,7 +38,8 @@
 | **凭证自持** | V24 起 Router 不再管理密钥，插件用自身 OAuth token 访问上游；Router 发占位凭证 `Bearer xrl-router`，插件必须忽略 |
 | **无状态** | 每个请求独立签名（Cosy），无 session 存储（token 缓存是性能优化，非业务状态） |
 | **字节透传** | 仅解包外层 SSE wrapper（`{"body":"..."}`），内层 chunk 原样转发 |
-| **自动恢复** | WS 断线指数退避重连（max 60s）；token 过期按需刷新 + auth-v2.dat 文件监听自动拾取；端口占用自动 kill |
+| **自动恢复** | WS 断线指数退避重连（max 60s）；qwenwork token 按需刷新 + `auth-v2.dat` 文件监听；qoder token 只读 + `auth.v1.dat` 文件监听；端口占用自动 kill |
+| **凭据所有权** | qwenwork 插件可刷新并写回；qoder 插件只读，refresh token 轮换权归 Qoder App |
 
 ---
 
@@ -43,11 +47,18 @@
 
 ```
 src/
-├── index.ts              # Hono 入口：路由 + 端口释放 + 优雅退出
-├── config.ts             # 配置单例：env 读取
-├── pluginClient.ts       # WebSocket 客户端：V24 注册（无 keys）/ 心跳 / 重连
-├── client.ts             # qwenwork 通道转发：签名 + SSE 解包 + tool_calls 标准化
-├── auth.ts               # token 管理：safeStorage 解密/加密（Keychain/DPAPI）/ refresh / 文件监听 / 三源 fallback / adoptCredential
+├── index.ts              # qwenwork 入口：初始化 token 管理 + 启动共享服务
+├── qoderIndex.ts         # qoder 入口：初始化只读 token 管理 + 启动共享服务
+├── server.ts             # 共享 Hono 骨架：路由 + 端口释放 + 优雅退出 + PluginClient
+├── forward.ts            # 共享转发核心：签名 + SSE 解包 + tool_calls 标准化 + 非流式聚合
+├── config.ts             # qwenwork 配置单例：env 读取
+├── qoderConfig.ts        # qoder 配置单例：端口/模型/凭据路径
+├── pluginClient.ts       # WebSocket 客户端：V24 注册（无 keys）/ 心跳 / 重连（参数化）
+├── client.ts             # qwenwork 通道差异：静态头 / business / 展示名 / 灾备 refresh
+├── qoderClient.ts        # qoder 通道差异：静态头 / business / agent_id / 展示名
+├── auth.ts               # qwenwork token：safeStorage / refresh / 文件监听 / 三源 fallback / adoptCredential
+├── qoderAuth.ts          # qoder token：只读解密 + 缓存 + 文件监听（不刷新不写回）
+├── safeStorage.ts        # Electron safeStorage 解密/加密（Keychain / DPAPI）
 ├── deviceLogin.ts        # 网页 device-flow 登录：PKCE + selectAccounts URL + deviceToken/poll 轮询
 ├── envStore.ts           # .env 安全读写单点：git-ignore 守卫 + 单行 upsert + mode 600
 └── signer.ts             # 请求签名：AES-128-CBC + RSA_PKCS1 + MD5
@@ -56,27 +67,35 @@ src/
 ### 依赖图
 
 ```
-index.ts (Hono)
-├── config.ts
-├── pluginClient.ts ← config.ts
-│   └── client.ts (displayName)
-├── client.ts ← config.ts, auth.ts, signer.ts
-│   ├── auth.ts ← config.ts
-│   └── signer.ts ← config.ts, auth.ts (types)
-├── auth.ts ← config.ts
-└── deviceLogin.ts ← config.ts, envStore.ts
-    └── envStore.ts（无内部依赖；log-in.ts 脚本额外引 auth/client/deviceLogin/envStore）
+index.ts / qoderIndex.ts
+├── config.ts / qoderConfig.ts
+├── auth.ts / qoderAuth.ts ← safeStorage.ts
+├── client.ts / qoderClient.ts ← forward.ts
+│   └── forward.ts ← signer.ts（Token 形状）
+├── signer.ts
+└── server.ts
+    ├── pluginClient.ts ← 入口传入的配置
+    └── 入口传入的 forwardChatCompletions / displayName
+
+qwenwork:
+  auth.ts ← config.ts + safeStorage.ts
+  client.ts ← config.ts + auth.ts + forward.ts
+qoder:
+  qoderAuth.ts ← qoderConfig.ts + safeStorage.ts
+  qoderClient.ts ← qoderConfig.ts + qoderAuth.ts + forward.ts
+
+log-in.ts 脚本额外引 auth/client/deviceLogin/envStore
 ```
 
 ---
 
 ## 3. 模块设计
 
-### 3.1 config.ts — 配置单例
+### 3.1 config.ts / qoderConfig.ts — 配置单例
 
-导出 `settings: Settings` 单例，进程启动时一次性从 `process.env` 读取，此后不再重新加载。
+两个入口各自导出配置单例，进程启动时一次性读取 `process.env`，此后不再重新加载。
 
-**Settings 接口**包含 qwenwork 通道的全部字段：
+**Settings（qwenwork）**：
 
 | 分组 | 字段 | 说明 |
 |------|------|------|
@@ -84,9 +103,26 @@ index.ts (Hono)
 | qwenwork | `qwenBaseUrl`, `qwenOauthTokenPath`, `qwenUserDataDir`, `qwenKeychainService`, `qwenKeychainAccount`, `qwenDeviceRefreshPath`, `qwenDevicePollPath`, `qwenAuthBase`, `qwenClientId`, `qwenLoginTimeoutMs`, `qwenMachineId`, `qwenRsaPublicKeyPath`, `qwenRefreshIntervalMs`, `qwenTarget` | 推理网关地址 + OAuth/签名/网页登录参数 |
 | xrl-router | `xrlRouterUrl` | WS 连接地址 |
 
+**QoderSettings（qoder）**：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `port` | `19070` | 监听端口（19069 已被 xrp-workbuddy 占用） |
+| `availableModels` | `qfmodel,dfmodel` | 当前账号已启用的目录 key |
+| `baseUrl` | `https://api3.qoder.sh` | Qoder 推理/目录网关 |
+| `oauthTokenPath` | `%APPDATA%/com.qoder.app.stable/auth.v1.dat` | Qoder App 登录态（只读） |
+| `userDataDir` | `%APPDATA%/com.qoder.app.stable` | 读 `Local State` 的 os_crypt 密钥 |
+| `keychainService` / `keychainAccount` | `Qoder Safe Storage` / `Qoder Key` | macOS Keychain（未真机验证，可 env 覆盖） |
+| `xrlRouterUrl` | `http://localhost:19068` | WS 连接地址 |
+
 ### 3.2 pluginClient.ts — WS 客户端（V24 契约）
 
-`PluginClient` 类，构造时立即连接 `ws://{host}/ws/plugin`。
+`PluginClient` 类由入口参数化构造（`routerUrl` / `pluginId` / `port` / `models` / `displayName`），构造时立即连接 `ws://{host}/ws/plugin`。两个通道各起一个实例：
+
+| 入口 | plugin_id | 端口 | 默认模型 |
+|------|-----------|------|---------|
+| `index.ts` | `plugin-qwenwork` | 19067 | `flash`, `pro`, `qwen3.8-max-preview` |
+| `qoderIndex.ts` | `plugin-qoder` | 19070 | `qfmodel`, `dfmodel` |
 
 #### 注册消息格式（V24）
 
@@ -100,10 +136,9 @@ index.ts (Hono)
     "api_path": "/v1/chat/completions"
   },
   "models": [
-    { "model_id": "qwork-advanced", "display_name": "glm-5.2", "tier": "custom" },
-    { "model_id": "qwork-auto", "display_name": "qwen3.7-plus", "tier": "custom" },
-    { "model_id": "qwork-lite", "display_name": "deepseek-v4-flash", "tier": "custom" },
-    { "model_id": "qmodel_latest", "display_name": "qwen3.8-max", "tier": "custom" }
+    { "model_id": "flash", "display_name": "Standard", "tier": "custom" },
+    { "model_id": "pro", "display_name": "Pro", "tier": "custom" },
+    { "model_id": "qwen3.8-max-preview", "display_name": "Qwen3.8-Max", "tier": "custom" }
   ],
   "workdir": "C:/Users/me/plugins/qwenwork"
 }
@@ -112,7 +147,7 @@ index.ts (Hono)
 **注意**：
 - **不带 `keys` 字段** — Router V24 起严格拒绝带 keys 的 register，回 `{"type":"error","reason":"keys_not_supported"}` 并断开
 - `kind` 为 `chat_completions`（不是 `openai`）
-- `plugin_id` 为 `plugin-qwenwork`
+- `plugin_id` / 端口 / 模型由入口传入，不在客户端内硬编码
 - `workdir` 为伴生启动 cwd（COALESCE 语义）
 
 #### 定时任务
@@ -125,18 +160,33 @@ index.ts (Hono)
 
 指数退避：`delay = min(1000ms * 2^attempts, 60000ms)`。每次 `open` 事件重置 `reconnectAttempts = 0`。
 
-### 3.3 client.ts — 签名转发
+### 3.3 forward.ts — 共享转发核心
 
-`forwardChatCompletions(body, res, authHeader)` 处理流程：
+`forwardChatCompletionsGeneric(body, res, authHeader, opts)` 承载两个通道的全部共同逻辑。通道文件只声明差异：
+
+| opts | qwenwork | qoder |
+|------|----------|-------|
+| `provider` | `qwenwork` | `qoder` |
+| `baseUrl` | `gateway.qwenwork.cn` | `api3.qoder.sh` |
+| `staticHeaders` | 12 个 `Cosy-*` / Login / model-source | 同左 + `X-Qoder-Remote-Api-Version` + `User-Agent` |
+| `product`（缺省 business） | `qoder_work` | `qoder` |
+| `bodyDefaults` | — | `agent_id: 'agent_common'` |
+| `defaultModel` | `flash` | `qfmodel` |
+| `modelHeaderName` | `x-model-key` | `x-model-key` |
+| `getToken` | `getToken`（可刷新） | `getQoderToken`（只读） |
+| `fallbackAuth` | 占位凭证中若带 `ory_rt_` 则灾备 refresh | — |
+| `ensureUid` / `authErrorMessage` | 从 JWT 解 uid / 中文提示 | — / 中文提示 |
+
+处理流程：
 
 ```
-  getToken()              ← 缓存管理（5min 缓冲，按需刷新 + 文件监听自动拾取）
+  opts.getToken()         ← 通道各自的缓存/刷新策略
         │
-        │ 缓存全失效？灾备 ↓
-  extractRefreshToken(authHeader) ← 从占位凭证 Bearer xrl-router 中取（占位凭证本身不可用，仅作灾备触发）
+        │ （qwenwork）缓存全失效？灾备 ↓
+  opts.fallbackAuth(authHeader) ← 占位凭证 Bearer xrl-router 仅作灾备触发
         │
         ▼
-  extractUidFromToken(jwt)  ← 解 JWT payload.sub / .uid / .user_id
+  opts.ensureUid(token)   ← 必要时从 JWT payload.sub / .uid / .user_id 解 uid
         │
         ▼
   buildSignMaterial(token)  ← 随机 16B AES key → Cosy-Key + info
@@ -145,18 +195,14 @@ index.ts (Hono)
   buildAuthHeaders(m, url, body) ← MD5 签名 → Authorization: Bearer COSY.xxx.sig
         │
         ▼
-  fetch(gateway.qwenwork.cn/algo/api/v2/service/pro/sse/agent_chat_generation)
+  fetch(opts.baseUrl + opts.path + opts.query)
         │
         ▼
   ┌─ stream=true:  外层 SSE 解包 → 内层 OpenAI chunk 透传
   └─ stream=false: delta 聚合 → 完整 chat.completion JSON
 ```
 
-**Token 策略（方案 A）**：不再每请求都 refresh（避免插件与千问 App 轮换互踩导致 refresh token 快速失效）。`getToken()` 维护内存缓存，access token 剩余 > 5 分钟时直接返回，零网络开销。refresh 成功后写回 `auth-v2.dat`（双向同步），千问 App 下次读取时拿到同一个 refresh token，避免轮换互踩。
-
-**静态头**：12 个固定值（`Cosy-Business-Product: qoder_work`, `Cosy-Scene: qwork`, `Cosy-Version: 1.0.47` 等）。
-
-**展示名映射**：`qwork-advanced` → `glm-5.2`、`qwork-auto` → `qwen3.7-plus`、`qwork-lite` → `deepseek-v4-flash`、`qmodel_latest` → `qwen3.8-max`（注册给 xrl-router 的 display_name）。请求方向无别名映射——客户端发送什么 `model` 就透传什么，缺省时默认 `qwork-advanced`。
+**请求体构造**：`{ ...bodyDefaults, ...body }` 后强制补齐 `model` / `request_id` / `session_id` / `business`，再删除 `encode` / `extra_body`。明文 JSON，**不**使用 `Encode=1`（WASM 签名链不是必需品）。
 
 **流式 tool_calls 标准化**（适配 xrl-router 的转换逻辑）：
 - xrl-router 把「某 index 的首个 chunk」解析为 `content_block_start`（input 字段），其余分片作为 `input_json_delta` 处理
@@ -165,7 +211,36 @@ index.ts (Hono)
 
 **非流式聚合**：读取所有 SSE chunk，拼接 `choices[0].delta` 的 `content` / `reasoning_content`（空值时字段不存在），`tool_calls` 按 `index` 分组拼接 `arguments`。
 
-### 3.4 auth.ts — token 管理
+**上游错误**：外层 `statusCodeValue !== 200` 或内层出现 `code/message` 时记录并终止，避免把错误当正文透传。
+
+### 3.4 client.ts — qwenwork 通道
+
+**Token 策略（方案 A）**：不再每请求都 refresh（避免插件与千问 App 轮换互踩导致 refresh token 快速失效）。`getToken()` 维护内存缓存，access token 剩余 > 5 分钟时直接返回，零网络开销。refresh 成功后写回 `auth-v2.dat`（双向同步），千问 App 下次读取时拿到同一个 refresh token，避免轮换互踩。
+
+**静态头**：12 个固定值（`Cosy-Business-Product: qoder_work`, `Cosy-Scene: qwork`, `Cosy-Version: 1.1.59`, `Login-Version: v2` 等）。
+
+**展示名映射**：`flash` → `Standard`、`pro` → `Pro`、`qwen3.8-max-preview` → `Qwen3.8-Max`（注册给 xrl-router 的 display_name）。请求方向无别名映射——客户端发送什么 `model` 就透传什么，缺省时默认 `flash`。
+
+**业务字段**：`business: { product: 'qoder_work' }`（新版网关定位模型目录的必需字段，缺失会 503 `Model catalog unavailable`）。
+
+### 3.5 qoderClient.ts — qoder 通道
+
+Qoder 与 qwenwork 同协议族（相同推理路径、相同 Cosy 签名、相同双层 SSE），差异集中在：
+
+| 差异 | 取值 |
+|------|------|
+| host | `https://api3.qoder.sh`（目录为 `GET /algo/api/v2/model/list?Encode=1`） |
+| `business.product` | `qoder`（实测 `qoder_work` 也可，采用 `qoder`） |
+| 必备 body 字段 | `agent_id: 'agent_common'`（缺失时内层 400 `None flow nodes found for router agent_router`） |
+| 静态头 | `Cosy-Business-Product: qoder`、`X-Qoder-Remote-Api-Version: 2`、`User-Agent: Qoder/0.4.8` |
+| 凭据 | Qoder App 的 `auth.v1.dat`（只读） |
+| 默认模型 | `qfmodel`（Qwen3.8-Flash）；可选 `dfmodel`（DeepSeek-Flash） |
+
+**模型目录**：`GET /algo/api/v2/model/list?Encode=1` 按场景分组，当前账号仅 `qfmodel` / `dfmodel` 的 `enable=true`。注册列表来自 `QODER_MODELS`，展示名映射见 `qoderClient.ts` 的 `DISPLAY_NAMES`。
+
+**请求体**：除通用字段外自动补 `agent_id`；`version` 可选。
+
+### 3.6 auth.ts — qwenwork token 管理
 
 #### decryptAuthFile — safeStorage 解密（按平台分派）
 
@@ -181,7 +256,7 @@ AES-128-CBC(key=aesKey, iv=0x20×16)    aes-256-gcm 解密
 JSON → QwenTokenState { token, refreshToken, user, expiresAt, raw }
 ```
 
-macOS（Keychain + PBKDF2 + AES-128-CBC）与 Windows（Local State 取 key → DPAPI 解包 → AES-256-GCM）均支持；按 `process.platform` 分派，Windows 依赖系统自带 powershell.exe（零新依赖）。
+实现位于共享模块 `safeStorage.ts`（见 §3.8），本文件只负责 token 语义。macOS（Keychain + PBKDF2 + AES-128-CBC）与 Windows（Local State 取 key → DPAPI 解包 → AES-256-GCM）均支持。
 
 #### refreshDeviceToken
 
@@ -205,7 +280,40 @@ macOS（Keychain + PBKDF2 + AES-128-CBC）与 Windows（Local State 取 key → 
   throw Error
 ```
 
-### 3.5 signer.ts — 请求签名
+### 3.7 qoderAuth.ts — qoder token 管理（只读）
+
+```
+initQoderTokenManager()
+  · 启动时解密 auth.v1.dat → 内存缓存 + 日志有效期
+  · fs.watch(auth.v1.dat)（1s 防抖 + mtime 去重）→ App 刷新后自动拾取
+  · 文件不存在：告警但不崩溃，请求到达时抛错提示登录
+        ▼
+getQoderToken()
+  · 缓存剩余 > 5min → 直接返回
+  · 否则重读 auth.v1.dat（App 可能刚刷新）
+  · 仍过期 → throw「请打开 Qoder App 刷新登录」
+```
+
+**不做 refresh、不写回**：Qoder App 拥有 refresh token 轮换权；插件刷新会与 App 互踩并可能使其中一方掉线。凭据字段映射：`user.id` → `uid`，`expiresAt` / `refreshTokenExpiresAt` 为 ISO 字符串。
+
+### 3.8 safeStorage.ts — Electron safeStorage 解密/加密
+
+两个通道共用的文件解密/加密实现：
+
+```
+macOS（Keychain）                      Windows（DPAPI → AES-256-GCM）
+Keychain (service/account)             Local State 的 os_crypt.encrypted_key
+    ▼ password (去尾换行)               → base64 解码 → 去 "DPAPI\0" 前缀
+PBKDF2(password, "saltysalt", 1003, 16, sha1)   → CryptUnprotectData(entropy=NULL)
+    ▼ aesKey (16 bytes)                        ▼ 32B AES key
+AES-128-CBC(key=aesKey, iv=0x20×16)    v10 头后 = 12B nonce + 密文 + 16B tag
+    ▼ 跳过 "v10" 3 字节头解密            aes-256-gcm 解密
+JSON ← 明文
+```
+
+导出 `decryptSafeStorageJson(filePath, opts)` / `encryptSafeStorageJson(filePath, json, opts)`。qwenwork 使用后者写回 `auth-v2.dat`；qoder 只调用前者。Windows 依赖系统自带 powershell.exe（零新依赖）。
+
+### 3.9 signer.ts — 请求签名
 
 #### buildSignMaterial — encryptUserInfo 等价物
 
@@ -235,7 +343,18 @@ Authorization = "Bearer COSY." + o + "." + sig
 
 签名绑定 body + path + 时间戳，天然防重放。
 
-### 3.6 index.ts — Hono 入口
+### 3.10 server.ts / index.ts / qoderIndex.ts — Hono 入口
+
+`server.ts` 提供共享 `startPluginServer(opts)`：创建 Hono app、释放端口、启动 HTTP 服务、启动 `PluginClient`、注册优雅退出。两个入口只传差异：
+
+| opts | `index.ts` | `qoderIndex.ts` |
+|------|-----------|-----------------|
+| `pluginId` | `plugin-qwenwork` | `plugin-qoder` |
+| `backend` | `qwenwork` | `qoder` |
+| `port` | 19067 | 19070 |
+| `baseUrl` | `settings.qwenBaseUrl` | `qoderSettings.baseUrl` |
+| `models` | `settings.availableModels` | `qoderSettings.availableModels` |
+| `forward` | `client.forwardChatCompletions` | `qoderClient.forwardChatCompletions` |
 
 #### 路由
 
@@ -243,7 +362,7 @@ Authorization = "Bearer COSY." + o + "." + sig
 |------|------|------|
 | `GET` | `/` | 健康探针：返回 version / backend / endpoints |
 | `GET` | `/health` | 健康检查：返回 status / backend / base_url |
-| `POST` | `/v1/chat/completions` | OpenAI Chat Completions：调用 `forwardChatCompletions` |
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions：调用入口传入的 `forward` |
 
 #### killPortProcess — 跨平台端口释放
 
@@ -256,7 +375,7 @@ Authorization = "Bearer COSY." + o + "." + sig
 
 `SIGTERM` / `SIGINT` → `pluginClient.close()` → `process.exit(0)`。`close()` 清理心跳定时器、重连定时器、WS 连接。
 
-### 3.7 deviceLogin.ts — 网页 device-flow 登录
+### 3.11 deviceLogin.ts — 网页 device-flow 登录
 
 ```
 buildDeviceLoginParams()   # PKCE(S256) + nonce(UUID) + machineId(env > .env > 生成持久化)
@@ -276,7 +395,7 @@ DeviceFlowCredential { token, refreshToken, expiresAt, refreshTokenExpiresAt? }
 
 协议来源：QwenWorkCN 1.2.5 app.asar 逆向 + 2026-09-30 在线探活，详见 [specs/qwenwork-device-login.md](specs/qwenwork-device-login.md)。消费入口为 `scripts/log-in.ts`（`pnpm log-in`）。
 
-### 3.8 envStore.ts — .env 安全读写单点
+### 3.12 envStore.ts — .env 安全读写单点
 
 | 函数 | 说明 |
 |------|------|
@@ -321,7 +440,27 @@ data: {"id":"chatcmpl-xxx","choices":[{"delta":{"content":"..."}}]}
 
 非流式时聚合所有 delta 为完整 `chat.completion` 对象。
 
-### 4.2 WebSocket 协议（V24 契约）
+### 4.2 OpenAI → qoder 映射
+
+请求形状与 4.1 完全一致（相同 path/query、相同签名、相同双层 SSE），差异：
+
+```
+Host:          https://api3.qoder.sh
+x-model-key:   qfmodel | dfmodel
+Cosy-Business-Product:  qoder
+X-Qoder-Remote-Api-Version: 2
+User-Agent:    Qoder/0.4.8
++ 12 个与 qwenwork 相同的静态头（`Cosy-Version: 1.1.59` 等）
+
+body: { ..., business: { product: 'qoder' }, agent_id: 'agent_common', ... }
+```
+
+- `agent_id` 是 Qoder agent router 定位 flow 的必备字段，缺失时内层 400 `None flow nodes found for router agent_router`
+- `business.product` 用 `qoder`（实测 `qoder_work` 也可）
+- 模型目录：`GET /algo/api/v2/model/list?Encode=1`，当前账号仅 `qfmodel`（Qwen3.8-Flash）与 `dfmodel`（DeepSeek-Flash）启用
+- 凭据 token 为 `dt-` 前缀 opaque token（非 JWT），uid 直接取 `auth.v1.dat` 的 `user.id`
+
+### 4.3 WebSocket 协议（V24 契约）
 
 插件与 xrl-router 之间通过 WebSocket (`/ws/plugin`) 通信。
 
@@ -352,9 +491,16 @@ Router 对插件上游请求恒发占位值：`Authorization: Bearer xrl-router`
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `QWEN_PORT` | `19067` | HTTP 监听端口 |
-| `AVAILABLE_MODELS` | `qwork-advanced,qwork-auto,qwork-lite,qmodel_latest` | 逗号分隔的可用模型列表 |
-| `XRL_ROUTER_URL` | `http://localhost:19068` | xrl-router WS 连接地址 |
+| `QWEN_PORT` | `19067` | qwenwork HTTP 监听端口 |
+| `AVAILABLE_MODELS` | `flash,pro,qwen3.8-max-preview` | qwenwork 逗号分隔的可用模型列表 |
+| `XRL_ROUTER_URL` | `http://localhost:19068` | xrl-router WS 连接地址（两个通道共用） |
+| `QODER_PORT` | `19070` | qoder HTTP 监听端口 |
+| `QODER_MODELS` | `qfmodel,dfmodel` | qoder 逗号分隔的可用模型列表 |
+| `QODER_BASE_URL` | `https://api3.qoder.sh` | qoder 推理网关地址 |
+| `QODER_OAUTH_TOKEN_PATH` | `%APPDATA%/com.qoder.app.stable/auth.v1.dat` | qoder 登录态路径（只读） |
+| `QODER_USER_DATA_DIR` | `%APPDATA%/com.qoder.app.stable` | qoder Electron userData 目录 |
+| `QODER_KEYCHAIN_SERVICE` | `Qoder Safe Storage` | qoder macOS Keychain service（未真机验证） |
+| `QODER_KEYCHAIN_ACCOUNT` | `Qoder Key` | qoder macOS Keychain account（未真机验证） |
 | `QWEN_BASE_URL` | `https://gateway.qwenwork.cn` | 推理网关地址 |
 | `QWEN_OAUTH_TOKEN_PATH` | `~/Library/Application Support/QwenWorkCN/auth-v2.dat` | OAuth token 的文件路径 |
 | `QWEN_KEYCHAIN_SERVICE` | `QwenWorkCN Safe Storage` | macOS Keychain service 名 |
@@ -382,6 +528,9 @@ Router 对插件上游请求恒发占位值：`Authorization: Bearer xrl-router`
 [qwenwork] token 已刷新（有效期至 2026-08-02T15:30:00.000Z）
 [qwenwork] QWEN_KEYS 同步失败（不影响运行）: EACCES
 [qwenwork] 流读取失败: network timeout
+[qoder] 已加载 auth.v1.dat（有效期至 2026-11-19T02:58:20.000Z）
+[qoder] auth.v1.dat 已更新（Qoder App 刷新了 token），重新读取…
+[qoder] 流读取失败: network timeout
 ```
 
 ---
@@ -420,3 +569,19 @@ Router 对插件上游请求恒发占位值：`Authorization: Bearer xrl-router`
   1. 千问办公 App 是否已登录（`auth-v2.dat` 存在？）
   2. `.env` 中 `QWEN_KEYS` 是否有值
   3. macOS Keychain 中 `QwenWorkCN Safe Storage` 条目是否存在（`security find-generic-password -s "QwenWorkCN Safe Storage" -a "QwenWorkCN Key"`）
+
+### qoder 凭据不存在 / 已过期
+
+- 表现：`未找到 Qoder 登录态（…auth.v1.dat）` 或 `Qoder access token 已过期（…）。本插件只读凭据，请打开 Qoder App 刷新登录后重试`
+- 原因：插件不刷新、不写回 qoder 凭据；Qoder App 未登录或长时间未打开导致 access token 超过本地有效期
+- 修复：打开 Qoder App 刷新登录，插件会通过文件监听自动拾取新 token，无需重启
+
+### qoder 内层 400 `None flow nodes found for router agent_router`
+
+- 原因：请求体缺少 `agent_id`
+- 修复：不要移除 `qoderClient.ts` 的 `bodyDefaults: { agent_id: 'agent_common' }`
+
+### qoder 目录只显示两个模型
+
+- 现象：`GET /algo/api/v2/model/list` 中多数模型 `enable=false`
+- 原因：当前账号档位限制，非插件问题；可用 `QODER_MODELS` 覆盖注册列表，但未启用的模型无法推理

@@ -9,13 +9,18 @@
  */
 
 import { WebSocket } from 'ws';
-import { settings } from './config';
-import { displayName as qwenDisplayName } from './client';
 
-const PLUGIN_ID = 'plugin-qwenwork';
 const HEARTBEAT_INTERVAL_MS = 30000;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 60000;
+
+export interface PluginClientOptions {
+  routerUrl: string;
+  pluginId: string;
+  port: number;
+  models: string[];
+  displayName: (modelId: string) => string;
+}
 
 export class PluginClient {
   private ws: WebSocket | null = null;
@@ -23,7 +28,7 @@ export class PluginClient {
   private reconnectAttempts = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
 
-  constructor() {
+  constructor(private readonly opts: PluginClientOptions) {
     this.connect();
   }
 
@@ -31,7 +36,7 @@ export class PluginClient {
    * 连接 xrl-router
    */
   private connect(): void {
-    const wsUrl = settings.xrlRouterUrl.replace(/^http/, 'ws') + '/ws/plugin';
+    const wsUrl = this.opts.routerUrl.replace(/^http/, 'ws') + '/ws/plugin';
     this.ws = new WebSocket(wsUrl);
 
     this.ws.on('open', () => {
@@ -60,18 +65,18 @@ export class PluginClient {
    * 发送注册消息（V24 契约：无 keys，kind=chat_completions，带 workdir）
    */
   private sendRegister(): void {
-    const models = settings.availableModels.map(id => ({
+    const models = this.opts.models.map(id => ({
       model_id: id,
-      display_name: qwenDisplayName(id),
+      display_name: this.opts.displayName(id),
       tier: 'custom',
     }));
 
     const message = {
       type: 'register',
-      plugin_id: PLUGIN_ID,
+      plugin_id: this.opts.pluginId,
       provider: {
         kind: 'chat_completions',
-        base_url: `http://localhost:${settings.port}`,
+        base_url: `http://localhost:${this.opts.port}`,
         api_path: '/v1/chat/completions',
       },
       models,

@@ -8,7 +8,12 @@
 
 import crypto from 'node:crypto';
 import { settings } from './config';
-import type { QwenTokenState } from './auth';
+
+/** 签名所需的最小 token 形状（qwenwork / qoder 通道共用） */
+export interface SignToken {
+  token: string;
+  user: { uid: string; name?: string; email?: string };
+}
 
 /** asar 硬编码 RSA 公钥（QwenWorkCN 0.1.3；modulus 头 c0f223…，非 security-guard 内部公钥） */
 const EMBEDDED_RSA_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
@@ -53,7 +58,7 @@ export interface QwenSignMaterial {
 }
 
 /** encryptUserInfo 等价物 */
-export function buildSignMaterial(token: QwenTokenState): QwenSignMaterial {
+export function buildSignMaterial(token: SignToken): QwenSignMaterial {
   const e = crypto.randomUUID().replace(/-/g, '').substring(0, 16);
   const userInfo = {
     uid: token.user.uid,

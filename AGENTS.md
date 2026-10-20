@@ -3,16 +3,17 @@
 本文件为 AI Agent 划定项目边界。任何 Agent 在本仓库工作时，必须遵守以下约束。
 
 ## 概述
-- 本项目是什么：一个 **qwenwork 通道的 xrl-router 插件**，将中国 AI 网关包装为 OpenAI Chat Completions 兼容的本地服务喵～
+- 本项目是什么：一个 **qwenwork / qoder 双通道的 xrl-router 插件**，将两个同协议族的 AI 网关包装为 OpenAI Chat Completions 兼容的本地服务喵～
 
-| 上游网关 | 后端模型 |
-|---------|---------|
-| `gateway.qwenwork.cn` | 智谱 GLM-5.2 / Qwen3.7-plus / DeepSeek-V4-flash / Qwen3.8-max |
+| 通道 | 上游网关 | 后端模型 |
+|------|---------|---------|
+| qwenwork | `gateway.qwenwork.cn` | Standard / Pro / Qwen3.8-Max |
+| qoder | `api3.qoder.sh` | Qwen3.8-Flash / DeepSeek-Flash |
 
 协议边界：**只桥接 OpenAI Chat Completions（`/v1/chat/completions`）**，不做任何协议扩展喵。
 
 ## 边界与范围
-- 范围内：OpenAI Chat Completions 协议桥接（流式 + 非流式）、Cosy 签名、OAuth token 自动刷新、WebSocket 插件注册/心跳/重连（V24 契约）、网页 device-flow 登录（PKCE + deviceToken/poll）
+- 范围内：OpenAI Chat Completions 协议桥接（流式 + 非流式）、Cosy 签名、qwenwork token 自动刷新、qoder 只读凭据拾取、WebSocket 插件注册/心跳/重连（V24 契约）、网页 device-flow 登录（PKCE + deviceToken/poll）
 - 非目标（明确排除）：
   - **不实现 Anthropic Messages API** — 旧架构，已在 commit `63eb217` 中整体删除，不要加回来
   - **不做密钥轮转 / 重试逻辑** — 这是 xrl-router 的职责，插件只管转发
@@ -21,22 +22,25 @@
   - **不复用抓到的 JWT / cosy-key** — 网关有 anti-replay 检测，复用会被封
   - **不做 tools / tool_use 翻译** — xrl-router 自己处理
   - **不实现非 Chat Completions 端点** — `/v1/embeddings`、`/v1/completions` 等一律不加
+  - **qoder 凭据只读** — 不刷新、不写回 `auth.v1.dat`，不改 Qoder App 的任何文件；轮换权归 App
 
 ## Agent 操作指南
-- 如何理解本项目：纯翻译层插件——把千问办公网关（gateway.qwenwork.cn）的 Cosy 签名字段桥接为 OpenAI Chat Completions 兼容 API，不引入业务逻辑
+- 如何理解本项目：纯翻译层插件——把 qwenwork / qoder 网关的 Cosy 签名字段桥接为 OpenAI Chat Completions 兼容 API，不引入业务逻辑
 - 全局规则 / 约定：
   - **包管理器：pnpm**（不是 npm — npm 会触发 arborist `Link.matches` 崩溃 bug，详见 MEMORY）
   - **dev 模式：tsx**（已去掉 watch — 文件变更需手动重启）
   - **HTTP 框架：Hono**（不是 Express — V24 契约要求）
   - `.env` 永不进 git — `git check-ignore .env` 必须通过喵！
   - 只从自己登录的实例抓密钥，不要抓别人的
+  - 两个通道是**独立进程、独立插件**（`plugin-qwenwork`@19067 / `plugin-qoder`@19070），共享 `forward.ts` / `server.ts` / `signer.ts` / `safeStorage.ts`，不要合并成单进程
   - V24 契约：register 不带 `keys`（带了 Router 直接拒绝断开）、不发 `keys_update`（发了直接断开）、`provider.kind` 为 `chat_completions`、心跳 `{"type": "heartbeat"}` 不带 timestamp、register 带 `workdir`、Router 发占位凭证 `Authorization: Bearer xrl-router`（插件用自身凭证访问上游）
 
 ### 构建与运行
 
 ```bash
 pnpm install              # 安装依赖（再次强调：不要用 npm）
-pnpm serve                # 启动插件网关
+pnpm serve                # 启动 qwenwork 网关（19067）
+pnpm serve:qoder          # 启动 qoder 网关（19070；需先登录 Qoder App）
 pnpm log-in               # 网页扫码登录（device flow，无需 App）
 pnpm log-in:app           # App 链路登录（解密 auth-v2.dat + 验证刷新链）
 ```
@@ -46,8 +50,9 @@ pnpm log-in:app           # App 链路登录（解密 auth-v2.dat + 验证刷新
 | 现状 | 为什么不要修 |
 |------|-------------|
 | 密钥过期（~1h qwenwork access token） | 网关设计，自动刷新即可 |
+| qoder 凭据只读（过期需打开 Qoder App 刷新） | 插件写回会与 App 的 refresh token 轮换互踩；App 拥有轮换权 |
 | 无测试 | 当前阶段不需要，插件是纯翻译层 |
-| qwenwork Windows 解密依赖 powershell.exe | Windows DPAPI 经 PowerShell `System.Security` 调用，Windows 自带无需安装；macOS 走 Keychain |
+| Windows 解密依赖 powershell.exe | Windows DPAPI 经 PowerShell `System.Security` 调用，Windows 自带无需安装；macOS 走 Keychain |
 
 ### 必须拒绝的任务
 
@@ -65,13 +70,21 @@ pnpm log-in:app           # App 链路登录（解密 auth-v2.dat + 验证刷新
 - 新增模型展示名（`DISPLAY_NAMES`）
 - 维护网页 device-flow 登录（PKCE / `deviceToken/poll`，见 `docs/specs/qwenwork-device-login.md`）
 - 维护 App 链路登录诊断（`scripts/log-in-app.ts`）
+- 维护 qoder 通道的模型目录 / 展示名 / 请求差异（保持凭据只读）
 
 ## 目录速查
-- `src/index.ts` — Hono 入口：路由、端口释放、启动
-- `src/config.ts` — Settings 单例：集中读取环境变量
+- `src/index.ts` — qwenwork 入口：配置 + 启动
+- `src/qoderIndex.ts` — qoder 入口：配置 + 启动
+- `src/server.ts` — 共享 Hono 服务骨架：路由、端口释放、优雅退出
+- `src/forward.ts` — 共享转发核心：签名、SSE 解包、tool_calls 标准化、非流式聚合
+- `src/config.ts` — qwenwork Settings 单例
+- `src/qoderConfig.ts` — qoder Settings（端口/模型/凭据路径）
 - `src/pluginClient.ts` — WebSocket 客户端：注册（V24 无 keys）、心跳、重连
-- `src/client.ts` — 转发到 gateway.qwenwork.cn（签名 + SSE 解包）
-- `src/auth.ts` — OAuth token 管理（safeStorage 解密/加密 + 刷新 + 文件监听 + 三源 fallback + adoptCredential）
+- `src/client.ts` — qwenwork 通道差异：静态头、business、展示名、灾备 refresh
+- `src/qoderClient.ts` — qoder 通道差异：静态头、business、`agent_id`、展示名
+- `src/auth.ts` — qwenwork token 管理（刷新 + 文件监听 + 三源 fallback + adoptCredential）
+- `src/qoderAuth.ts` — qoder token 管理（只读 + 文件监听，不刷新不写回）
+- `src/safeStorage.ts` — Electron safeStorage 解密/加密（Keychain / DPAPI）
 - `src/deviceLogin.ts` — 网页 device-flow 登录（PKCE + deviceToken/poll，无需 App）
 - `src/envStore.ts` — .env 安全读写单点（git-ignore 守卫 + 单行 upsert）
 - `src/signer.ts` — RSA_PKCS1 + AES 签名（逆向自 asar）
