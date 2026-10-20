@@ -1,11 +1,13 @@
 /**
- * safeStorage.ts — Electron safeStorage 文件加解密（qwenwork / qoder 共用）。
+ * safeStorage.ts — Electron safeStorage 文件**解密**（qoder 通道只读拾取凭据用）。
  *
  * 文件格式（Electron）：
  * - macOS：Keychain 取密码 → PBKDF2(1003, saltysalt) → AES-128-CBC(IV=0x20)
  * - Windows：v10 + AES-256-GCM（12B nonce + 密文 + 16B tag）
  *   - 密钥：Local State 的 os_crypt.encrypted_key（"DPAPI\0" 前缀 + blob）
  *   - DPAPI 解包（entropy=NULL, CurrentUser）→ 32B AES key
+ *
+ * 加密（写回）能力已随千问办公 App 支持一并移除：本仓库不再写任何 App 的登录态文件。
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -87,27 +89,4 @@ export function decryptSafeStorageJson(filePath: string, opts: SafeStorageOption
     dec = Buffer.concat([d.update(enc.slice(3)), d.final()]);
   }
   return JSON.parse(dec.toString('utf8'));
-}
-
-/** 加密 JSON → Electron safeStorage 文件（复用 Local State / Keychain 的同一密钥） */
-export function encryptSafeStorageJson(filePath: string, json: any, opts: SafeStorageOptions): void {
-  const plaintext = Buffer.from(JSON.stringify(json), 'utf8');
-  if (process.platform === 'win32') {
-    const key = getWindowsAesKey(opts);
-    const nonce = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce);
-    const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    // v10 + 12B nonce + ciphertext + 16B tag
-    const out = Buffer.concat([Buffer.from('v10'), nonce, enc, tag]);
-    fs.writeFileSync(filePath, out, { mode: 0o600 });
-  } else {
-    const pw = getKeychainPassword(opts);
-    const aesKey = crypto.pbkdf2Sync(Buffer.from(pw, 'utf8'), 'saltysalt', 1003, 16, 'sha1');
-    const iv = Buffer.alloc(16, 0x20);
-    const cipher = crypto.createCipheriv('aes-128-cbc', aesKey, iv);
-    const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const out = Buffer.concat([Buffer.from('v10'), enc]);
-    fs.writeFileSync(filePath, out, { mode: 0o600 });
-  }
 }

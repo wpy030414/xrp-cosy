@@ -3,7 +3,7 @@
 > 本文件记录项目关键设计决策背后的**历史原因**，防止架构漂移。
 > 每条决策回答的是「为什么」而非「怎么做」。
 
-版本：0.6.0 | 最后更新：2026-10-20
+版本：0.7.0 | 最后更新：2026-10-20
 
 ---
 
@@ -81,7 +81,7 @@
 
 ---
 
-## D-8: 为什么现在写回 auth-v2.dat？（推翻旧决策）
+## D-8: 为什么现在写回 auth-v2.dat？（推翻旧决策 → 已被 D-16 再次推翻）
 
 **旧决策（已废弃）**：插件绝不写回 `auth-v2.dat`，只写 `.env QWEN_KEYS`。
 
@@ -94,6 +94,8 @@
 - 实际测试：千问 App 不做文件完整性校验，写回加密格式正确即可
 
 **决策**：refresh 成功后用 `encryptAuthFile()` 写回 `auth-v2.dat`（与解密完全对称的加密方式）。
+
+> ⚠️ **本决策已于 2026-10-20 被 D-16 推翻**：取消千问办公 App 支持后，插件不再读写 `auth-v2.dat`，写回分支与 `encryptAuthFile()` 一并删除。以下保留原文供历史参考。
 
 **收益**：
 - 插件和千问 App 持有相同的 refresh token，不再轮换互踩
@@ -186,6 +188,8 @@
 - `package.json`（无 express/cors，有 hono/@hono/node-server，有 login 脚本）
 - 删除文件：`src/channel.ts`、`src/wukong/`、`scripts/wukong/`、相关 docs
 
+---
+
 ## D-15: 为什么企业积分靠 switch-team 派生，而不是在登录 URL 上选企业版？
 
 **背景**：训练员反馈「网页登录后烧的是个人版积分，不是企业版」。网页登录页（`/biz/signin`）确实有企业/个人可选，
@@ -217,7 +221,34 @@
 | `biz` + 不存在 team_id | **0** | — | HTTP 401 明确报错，未降级 |
 
 **实现**：`src/bizIdentity.ts`（mint/getBizToken/fetchBalance）· `src/client.ts`（`getSigningToken`）·
-`scripts/log-in.ts`（`--identity biz [--team-id]` / `--list-orgs`）
+`scripts/log-in.ts`（`--identity biz [--team-id]` / `--list-orgs` / `--status`）
+
+## D-16: 为什么取消千问办公 App 支持？
+
+**背景**：插件的凭据链曾有三个源：内存缓存 → **App 的 `auth-v2.dat`（Electron safeStorage 解密）** → `.env QWEN_KEYS`。
+自 D-15 的网页 device-flow 登录（`pnpm log-in`）打通后，第一个 refresh token 已不再需要 App 产出。
+
+**问题**：
+- App 支路是**只为兜底而存在的复杂度**：解密（Keychain/PBKDF2/AES-CBC、Windows DPAPI/AES-GCM）+ 加密写回 + `fs.watch` 文件监听三套机制，
+  占 `auth.ts` 近半代码，却只服务「本机恰好装着 App」这一种部署形态
+- 与 App 双向同步（D-8）本质是**在两个持有同一轮换式 refresh token 的程序之间协调**：写回格式一旦与新版 App 不一致就污染对方登录态，
+  风险随 App 升级持续存在，收益只是省一次扫码
+- macOS 首次访问 Keychain 会弹系统授权框，Windows 依赖 powershell.exe + DPAPI，跨平台故障面与排查成本高（`auth-v2.dat 解密失败`/`文件头不是 v10` 一类）
+- 扣费身份（D-15）要求凭据来源可解释、可复现：混入 App 解出的凭据后，「当前烧哪个池」的诊断会多一个不可控变量
+
+**决策**：删除千问办公 App 链路，凭据来源收敛为**两源**（内存缓存 → `.env QWEN_KEYS`），两者都由 `pnpm log-in` 网页 device-flow 产出：
+- `src/auth.ts`：删除 `decryptAuthFile()` / `encryptAuthFile()` / `startAuthFileWatch()` / `initTokenManager()` 与 `QwenTokenState.raw`
+- `src/safeStorage.ts`：删除 `encryptSafeStorageJson()`（写回能力随 App 一起消失），模块收窄为**仅 qoder 通道只读解密**
+- `src/config.ts`：删除 `qwenOauthTokenPath` / `qwenUserDataDir` / `qwenKeychainService` / `qwenKeychainAccount` 及对应 4 个环境变量
+- 删除 `scripts/log-in-app.ts`（`pnpm log-in:app`）与 `docs/specs/capture-key-qwenwork.md`
+- `QWEN_IDENTITY=biz` 的诊断/派生链不受影响：派生始终用设备流根凭据
+
+**代价（已知取舍）**：`.env QWEN_KEYS` 丢失或全部作废时，只能重新扫码恢复，没有 App 兜底；跨机器部署靠拷 `.env`。
+
+**证据**：删除后 `pnpm exec tsc` 全绿（src + scripts），`pnpm log-in --status` 走 QWEN_KEYS 自举成功（根凭据 + 双池余额可读），
+`pnpm serve` 在无 App 的机器上正常启动并注册；本机 `auth-v2.dat` 本就不存在，此前一直是「缺文件 → 静默跳到下一源」路径，功能等价。
+
+---
 
 ---
 

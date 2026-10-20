@@ -4,7 +4,7 @@
 
 不依赖千问办公桌面 App，通过「浏览器扫码 + 本地轮询」的 device flow 直接获取第一份 qwenwork 凭据（access token + refresh token），写入 `.env QWEN_KEYS` 后交由 [qwenwork-token](./qwenwork-token.md) 的刷新链自动续期喵～
 
-**入口**：`pnpm log-in`（`scripts/log-in.ts`）。App 链路的旧工具为 `pnpm log-in:app`（`scripts/log-in-app.ts`），两者可共存。
+**入口**：`pnpm log-in`（`scripts/log-in.ts`）——qwenwork 渠道唯一的凭据入口，除登录外还含两个只读模式：`--status`（扣费身份与双池余额诊断）、`--list-orgs`（企业组织可用性）。千问办公 App 链路已取消支持（2026-10-20，见 `docs/DECISIONS.md` D-16）。
 
 ## 协议来源
 
@@ -99,17 +99,17 @@ Headers: Accept: application/json          # 必需
 2. 打印 + 尽力打开浏览器           # --no-open 可跳过；URL 恒打印兜底
 3. pollDeviceFlow()               # 每 15s 打印等待进度
 4. 打印脱敏 token / 有效期 / refresh token 有效期
-5. adoptCredential()              # 写入 auth.ts 内存缓存（无 raw → 永不写回 auth-v2.dat）
+5. 身份落地（--identity biz → getBizToken 派生 + 余额校验；失败则中止，不落盘 biz 配置）
 6. forceRefresh() 验证刷新链      # 失败重试 1 次；仍失败回退备份原始 refresh token 并 warn
 7. writeEnvValue('QWEN_KEYS', 轮换后 refresh token)
-8. 检测到 auth-v2.dat → 提示「App 登态保持不动（两条独立链）」
+9. 结果回显 + 指路 --status / --list-orgs
 ```
 
-### 与 App 链路的关系
+### 与千问办公 App 的关系
 
-- 网页登录创建的是**新会话链**；App 自己的 `auth-v2.dat` 链在服务端依旧有效，两条 `ory_rt_` 链互不失效（轮换只发生在链内）
-- 登录脚本**永不写** `auth-v2.dat`：poll 响应不含 App 所需完整 raw JSON（`loginDeviceId` 等），且无必要；`refreshDeviceToken` 的写回条件 `cached?.raw && exists` 天然不成立
-- serve 的三源 fallback（缓存 → auth-v2.dat → QWEN_KEYS）不变：装不装 App 都能跑
+- 2026-10-20 起**取消 App 支持**（见 `docs/DECISIONS.md` D-16）：网页 device-flow 是唯一凭据来源，`getToken()` 只剩两源（内存缓存 → `.env QWEN_KEYS`）
+- 插件不读取、也不写回 `auth-v2.dat`，因此与 App 是否安装/登录完全无关
+- 历史备注：曾支持解密 App 的 `auth-v2.dat` 作第三凭据源，并双向同步避免与 App 的 refresh token 轮换互踩——该分支已删除
 
 ## 验收标准
 
@@ -119,11 +119,12 @@ Headers: Accept: application/json          # 必需
 - [ ] 不扫码 → 超时后明确提示「N 秒内未完成登录，可重跑 pnpm log-in」
 - [ ] poll 响应 nonce/challenge 不匹配 → 拒绝采纳并报错
 - [ ] 登录后 `pnpm serve` 正常自举（QWEN_KEYS 刷新成功）→ `/v1/chat/completions` 可用
-- [ ] 装有 App 的机器：登录后 App 不受影响；`pnpm log-in:app` 旧链路照常
+- [ ] `pnpm log-in --status` 可读出当前扣费身份与个人/企业双池余额（无需扫码）
+- [ ] 机器上装有千问办公 App 时互不影响（插件不再读写任何 App 文件）
 
 ## 已知边界
 
-- **命令名**：`pnpm log-in`（网页）/ `pnpm log-in:app`（App 链路）——曾用名 `login` 被 pnpm 内建 registry login 遮蔽，已更名
+- **命令名**：`pnpm log-in`（唯一凭据入口）——曾用名 `login` 被 pnpm 内建 registry login 遮蔽，已更名；诊断曾用名 `pnpm credits`，已并入 `log-in --status`（`whoami` 亦与 pnpm 内建冲突）
 - **Windows 开浏览器**：`cmd /c start` 中 `&` 是命令分隔符，URL 必须加引号并配合 `windowsVerbatimArguments`（否则 URL 在第一个 `&` 处截断，浏览器收到残缺 query → 400 `INVALID_DEVICE_FLOW`）
 - poll 的「进行中」判定取 404 ∪ 400(INVALID_DEVICE_FLOW) 的并集：若服务端将来引入新的失败型 400，会以其他 errorCode 抛错；真失败流若表现为这两种状态之一，会空转到超时（超时文案含提示）
 - `X-QwenWork-*` 仿 App 头当前不被服务端校验；若将来校验，需同步 bump `APP_CLIENT_HEADERS`（App 版本升级时留意）

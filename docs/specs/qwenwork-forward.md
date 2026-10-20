@@ -17,8 +17,8 @@
 
 ## 关键约束
 
-1. **Token 来源**：`getToken()` 三源 fallback（内存缓存 → auth-v2.dat → .env QWEN_KEYS）；灾备从 `Authorization` 头取 `ory_rt_` 前缀 refresh token喵
-2. **Token 刷新链路**：`getToken()` 缓存有效（> 5min）→ 直接返回；过期 → 内存 refresh token → `refreshDeviceToken(rt)` 换取 access token + 新 refresh token → 写回 auth-v2.dat + .env → `extractUidFromToken(JWT payload)` 从 JWT 解出 uid
+1. **Token 来源**：`getToken()` 两源 fallback（内存缓存 → `.env QWEN_KEYS`）；灾备从 `Authorization` 头取 `ory_rt_` 前缀 refresh token喵（`QWEN_IDENTITY=biz` 时该灾备被禁用，见 D-15）
+2. **Token 刷新链路**：`getToken()` 缓存有效（> 5min）→ 直接返回；过期 → 内存 refresh token → `refreshDeviceToken(rt)` 换取 access token + 新 refresh token → 写回 `.env QWEN_KEYS`（不写任何 App 文件）→ `extractUidFromToken(JWT payload)` 从 JWT 解出 uid
 3. **模型默认（2026-09 新版）**：客户端未指定 `model` 时使用 `flash`；指定了什么就透传什么（无别名映射）。默认挡位列表：`flash`、`pro`、`qwen3.8-max-preview`（云端权威目录见 `GET /api/v2/model/list`，插件可用 `fetchModelCatalog()` 拉取）
 4. **Body 清洗**：`delete forwardBody.encode`、`delete forwardBody.extra_body`（qwenwork 网关明文即可，不需要 Encode=1）
 5. **自动填充**：`request_id` 和 `session_id` 缺失时用 `randomUUID()` 补全

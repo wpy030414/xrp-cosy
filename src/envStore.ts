@@ -1,7 +1,7 @@
 /**
  * qwenwork/envStore.ts — .env 安全读写单点。
  *
- * 约定（沿用 capture-key 的安全基线）：
+ * 约定（沿用 log-in 的安全基线）：
  * - 任何写入前必须通过 `git check-ignore .env` 守卫（防密钥进 git）
  * - 单行 upsert：只替换目标键所在行，其余行原样保留
  * - 文件权限 mode 0o600

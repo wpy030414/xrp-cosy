@@ -26,10 +26,8 @@
 | `AVAILABLE_MODELS` | `availableModels` | `flash,pro,qwen3.8-max-preview`（2026-09 新挡位；云端目录见 `GET /api/v2/model/list`） |
 | `XRL_ROUTER_URL` | `xrlRouterUrl` | `http://localhost:19068` |
 | `QWEN_KEYS` | （auth.ts 读取） | — |
-| `QWEN_OAUTH_TOKEN_PATH` | `qwenOauthTokenPath` | Windows: `%APPDATA%/QwenWorkCN/auth-v2.dat`；macOS: `~/Library/Application Support/QwenWorkCN/auth-v2.dat` |
-| `QWEN_USER_DATA_DIR` | `qwenUserDataDir` | Windows: `%APPDATA%/QwenWorkCN`；macOS: `~/Library/Application Support/QwenWorkCN`（Windows 读 Local State 的 os_crypt 密钥） |
-| `QWEN_KEYCHAIN_SERVICE` | `qwenKeychainService` | `QwenWorkCN Safe Storage`（仅 macOS 使用） |
-| `QWEN_KEYCHAIN_ACCOUNT` | `qwenKeychainAccount` | `QwenWorkCN Key`（仅 macOS 使用） |
+| ~~`QWEN_OAUTH_TOKEN_PATH`~~ | — | 已随千问办公 App 支持移除（2026-10-20，见 DECISIONS D-16） |
+| ~~`QWEN_USER_DATA_DIR` / `QWEN_KEYCHAIN_SERVICE` / `QWEN_KEYCHAIN_ACCOUNT`~~ | — | 同上：qwenwork 通道不再解密 App 登录态 |
 | `QWEN_BASE_URL` | `qwenBaseUrl` | `https://gateway.qwenwork.cn` |
 | `QWEN_DEVICE_REFRESH_PATH` | `qwenDeviceRefreshPath` | `/api/v1/deviceToken/refresh` |
 | `QWEN_REFRESH_INTERVAL_MS` | `qwenRefreshIntervalMs` | `600000`（10min） |
@@ -59,5 +57,4 @@ function env(key: string, fallback: string): string {
 ## 已知边界
 
 - `AVAILABLE_MODELS` split 后 `filter(Boolean)` 去掉空项（尾部逗号不会产空元素）
-- `QWEN_OAUTH_TOKEN_PATH` 默认用 `os.homedir()` 拼接，依赖运行用户 HOME 正确
 - `env()` 不区分 `undefined` 和空字符串 — 两者都走 fallback

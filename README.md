@@ -24,15 +24,16 @@
 - 安装步骤：`pnpm install`
 - qwenwork：`pnpm log-in`（网页扫码获取凭据）→ `pnpm serve`（端口 19067）
 - qoder：登录 Qoder App → `pnpm serve:qoder`（端口 19070；插件**只读** `auth.v1.dat`，不刷新、不写回）
+- qwenwork 扣费身份：`pnpm log-in --status` 查当前烧哪个积分池；切企业积分 `pnpm log-in --identity biz`（详见 `docs/DECISIONS.md` D-15）
 
 ## 当前状态
 - 阶段：开发中
-- 已知限制：qwenwork access token ~1h 过期（自动刷新）、refresh token 有服务端绝对过期时间（<24h 告警提示重登）；qoder 凭据完全交给 Qoder App 维护（插件只读，过期需打开 App 刷新）；无自动化测试
+- 已知限制：qwenwork access token ~1h 过期（自动刷新）、refresh token 有服务端绝对过期时间（<24h 告警提示重登）；qwenwork 不依赖千问办公 App（已取消 App 链路支持，凭据只走网页 device-flow）；qoder 凭据完全交给 Qoder App 维护（插件只读，过期需打开 App 刷新）；无自动化测试
 
 ## 核心技术
 - 语言 / 框架 / 关键依赖：TypeScript 5 · Hono 4 · ws 8 · tsx 4 · pnpm
 - 签名算法：AES-128-CBC + RSA_PKCS1 + MD5（逆向自 asar，两个通道共用）
-- OAuth：qwenwork 走 deviceToken/refresh 轮换 + PKCE device-flow 网页登录；qoder 只读 App 的 `auth.v1.dat`
+- OAuth：qwenwork 走 PKCE device-flow 网页登录 + deviceToken/refresh 轮换（凭据自持，不读写 App 文件）；qoder 只读 App 的 `auth.v1.dat`
 
 ## 验证
 

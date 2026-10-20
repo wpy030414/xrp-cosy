@@ -38,8 +38,8 @@
 | **凭证自持** | V24 起 Router 不再管理密钥，插件用自身 OAuth token 访问上游；Router 发占位凭证 `Bearer xrl-router`，插件必须忽略 |
 | **无状态** | 每个请求独立签名（Cosy），无 session 存储（token 缓存是性能优化，非业务状态） |
 | **字节透传** | 仅解包外层 SSE wrapper（`{"body":"..."}`），内层 chunk 原样转发 |
-| **自动恢复** | WS 断线指数退避重连（max 60s）；qwenwork token 按需刷新 + `auth-v2.dat` 文件监听；qoder token 只读 + `auth.v1.dat` 文件监听；端口占用自动 kill |
-| **凭据所有权** | qwenwork 插件可刷新并写回；qoder 插件只读，refresh token 轮换权归 Qoder App |
+| **自动恢复** | WS 断线指数退避重连（max 60s）；qwenwork token 按需刷新 + 轮换值落 `.env QWEN_KEYS`；qoder token 只读 + `auth.v1.dat` 文件监听；端口占用自动 kill |
+| **凭据所有权** | qwenwork 凭据由插件自持并自行轮换（只写本仓库的 `.env`，不碰任何 App 文件）；qoder 插件只读，refresh token 轮换权归 Qoder App |
 
 ---
 
@@ -56,9 +56,9 @@ src/
 ├── pluginClient.ts       # WebSocket 客户端：V24 注册（无 keys）/ 心跳 / 重连（参数化）
 ├── client.ts             # qwenwork 通道差异：静态头 / business / 展示名 / 灾备 refresh
 ├── qoderClient.ts        # qoder 通道差异：静态头 / business / agent_id / 展示名
-├── auth.ts               # qwenwork token：safeStorage / refresh / 文件监听 / 三源 fallback / adoptCredential
+├── auth.ts               # qwenwork token：refresh 轮换 / 两源 fallback（缓存 + .env QWEN_KEYS）/ adoptCredential
 ├── qoderAuth.ts          # qoder token：只读解密 + 缓存 + 文件监听（不刷新不写回）
-├── safeStorage.ts        # Electron safeStorage 解密/加密（Keychain / DPAPI）
+├── safeStorage.ts        # Electron safeStorage 解密（qoder 只读拾取用；Keychain / DPAPI）
 ├── deviceLogin.ts        # 网页 device-flow 登录：PKCE + selectAccounts URL + deviceToken/poll 轮询
 ├── envStore.ts           # .env 安全读写单点：git-ignore 守卫 + 单行 upsert + mode 600
 └── signer.ts             # 请求签名：AES-128-CBC + RSA_PKCS1 + MD5
@@ -69,7 +69,7 @@ src/
 ```
 index.ts / qoderIndex.ts
 ├── config.ts / qoderConfig.ts
-├── auth.ts / qoderAuth.ts ← safeStorage.ts
+├── auth.ts（无外部依赖） / qoderAuth.ts ← safeStorage.ts
 ├── client.ts / qoderClient.ts ← forward.ts
 │   └── forward.ts ← signer.ts（Token 形状）
 ├── signer.ts
@@ -78,8 +78,8 @@ index.ts / qoderIndex.ts
     └── 入口传入的 forwardChatCompletions / displayName
 
 qwenwork:
-  auth.ts ← config.ts + safeStorage.ts
-  client.ts ← config.ts + auth.ts + forward.ts
+  auth.ts ← config.ts
+  client.ts ← config.ts + auth.ts + bizIdentity.ts + forward.ts
 qoder:
   qoderAuth.ts ← qoderConfig.ts + safeStorage.ts
   qoderClient.ts ← qoderConfig.ts + qoderAuth.ts + forward.ts
@@ -100,7 +100,7 @@ log-in.ts 脚本额外引 auth/client/deviceLogin/envStore
 | 分组 | 字段 | 说明 |
 |------|------|------|
 | 通用 | `port`, `availableModels` | 监听端口（默认 19067）、可用模型列表 |
-| qwenwork | `qwenBaseUrl`, `qwenOauthTokenPath`, `qwenUserDataDir`, `qwenKeychainService`, `qwenKeychainAccount`, `qwenDeviceRefreshPath`, `qwenDevicePollPath`, `qwenAuthBase`, `qwenClientId`, `qwenLoginTimeoutMs`, `qwenMachineId`, `qwenRsaPublicKeyPath`, `qwenRefreshIntervalMs`, `qwenTarget` | 推理网关地址 + OAuth/签名/网页登录参数 |
+| qwenwork | `qwenBaseUrl`, `qwenDeviceRefreshPath`, `qwenDevicePollPath`, `qwenAuthBase`, `qwenClientId`, `qwenLoginTimeoutMs`, `qwenMachineId`, `qwenRsaPublicKeyPath`, `qwenRefreshIntervalMs`, `qwenTarget` | 推理网关地址 + OAuth/签名/网页登录参数 |
 | xrl-router | `xrlRouterUrl` | WS 连接地址 |
 
 **QoderSettings（qoder）**：
@@ -215,7 +215,7 @@ log-in.ts 脚本额外引 auth/client/deviceLogin/envStore
 
 ### 3.4 client.ts — qwenwork 通道
 
-**Token 策略（方案 A）**：不再每请求都 refresh（避免插件与千问 App 轮换互踩导致 refresh token 快速失效）。`getToken()` 维护内存缓存，access token 剩余 > 5 分钟时直接返回，零网络开销。refresh 成功后写回 `auth-v2.dat`（双向同步），千问 App 下次读取时拿到同一个 refresh token，避免轮换互踩。
+**Token 策略（方案 A）**：不再每请求都 refresh（refresh token 是轮换式的，每请求刷新会自踩）。`getToken()` 维护内存缓存，access token 剩余 > 5 分钟时直接返回，零网络开销。refresh 成功后把新 refresh token 落 `.env QWEN_KEYS`，进程重启可自举续命。凭据来源只有两条（缓存 + `.env`），均由 `pnpm log-in` 网页登录产出——2026-10-20 起已取消千问办公 App 支持，插件不读写任何 App 文件。
 
 **静态头**：12 个固定值（`Cosy-Business-Product: qoder_work`, `Cosy-Scene: qwork`, `Cosy-Version: 1.1.59`, `Login-Version: v2` 等）。
 
@@ -242,43 +242,29 @@ Qoder 与 qwenwork 同协议族（相同推理路径、相同 Cosy 签名、相�
 
 ### 3.6 auth.ts — qwenwork token 管理
 
-#### decryptAuthFile — safeStorage 解密（按平台分派）
-
-```
-macOS（Keychain）                      Windows（DPAPI → AES-256-GCM）
-Keychain ("QwenWorkCN Safe Storage" /  Local State 的 os_crypt.encrypted_key
- "QwenWorkCN Key")                     → base64 解码 → 去 "DPAPI\0" 前缀
-    ▼ password (去尾换行)                → CryptUnprotectData(entropy=NULL)
-PBKDF2(password, "saltysalt", 1003, 16, sha1)   ▼ 32B AES key
-    ▼ aesKey (16 bytes)                v10 头后 = 12B nonce + 密文 + 16B tag
-AES-128-CBC(key=aesKey, iv=0x20×16)    aes-256-gcm 解密
-    ▼ 解密 auth-v2.dat (跳过 "v10" 3字节头)
-JSON → QwenTokenState { token, refreshToken, user, expiresAt, raw }
-```
-
-实现位于共享模块 `safeStorage.ts`（见 §3.8），本文件只负责 token 语义。macOS（Keychain + PBKDF2 + AES-128-CBC）与 Windows（Local State 取 key → DPAPI 解包 → AES-256-GCM）均支持。
+无 App 依赖：凭据由 `pnpm log-in`（网页 device-flow）产出，本模块只管轮换与拾取。
 
 #### refreshDeviceToken
 
 `POST {qwenBaseUrl}/api/v1/deviceToken/refresh`，body `{ refresh_token, target: "c" }`。响应包含 `device_token`（新 access token）+ `refresh_token`（轮换后的新 refresh token）。刷新成功后：
-1. `encryptAuthFile()` 写回 `auth-v2.dat`（双向同步）
-2. `syncEnvRefreshToken()` 写回 `.env QWEN_KEYS`
+1. `syncEnvRefreshToken()` 写回 `.env QWEN_KEYS`（唯一持久化动作，不触碰任何 App 文件）
+2. `refresh_token_expires_at` 距今 < 24h 时告警提示重跑 `pnpm log-in`
 
-写回 `auth-v2.dat` 使用与解密完全对称的加密方式（Windows: AES-256-GCM / macOS: AES-128-CBC），复用已有 AES key。
+> 历史：曾把轮换结果**加密写回** `auth-v2.dat`（与千问办公 App 双向同步），已随 App 支持移除（见 `docs/DECISIONS.md` D-16）。
 
-#### getToken — 三源 fallback
+#### getToken — 两源 fallback
 
 ```
   缓存有效？（expiresAt > now + 5min）→ 直接返回，零网络请求
      │ 无效 ↓
   ① 内存缓存 refresh token → refreshDeviceToken()
-     │ 失败 ↓ 重读 auth-v2.dat
-  ② auth-v2.dat 解密 → token 有效直接用 / refresh token 刷新
      │ 失败 ↓
-  ③ .env QWEN_KEYS → refreshDeviceToken()
+  ② .env QWEN_KEYS → refreshDeviceToken()
      │ 失败 ↓
-  throw Error
+  throw Error('无可用 token 源（…请运行 pnpm log-in 网页登录）')
 ```
+
+`adoptCredential()` 供 log-in 把扫码结果写入缓存；`forceRefresh()` 供 log-in 验证刷新链。
 
 ### 3.7 qoderAuth.ts — qoder token 管理（只读）
 
@@ -296,7 +282,7 @@ getQoderToken()
 
 **不做 refresh、不写回**：Qoder App 拥有 refresh token 轮换权；插件刷新会与 App 互踩并可能使其中一方掉线。凭据字段映射：`user.id` → `uid`，`expiresAt` / `refreshTokenExpiresAt` 为 ISO 字符串。
 
-### 3.8 safeStorage.ts — Electron safeStorage 解密/加密
+### 3.8 safeStorage.ts — Electron safeStorage 解密（只读）
 
 两个通道共用的文件解密/加密实现：
 
@@ -311,7 +297,7 @@ AES-128-CBC(key=aesKey, iv=0x20×16)    v10 头后 = 12B nonce + 密文 + 16B ta
 JSON ← 明文
 ```
 
-导出 `decryptSafeStorageJson(filePath, opts)` / `encryptSafeStorageJson(filePath, json, opts)`。qwenwork 使用后者写回 `auth-v2.dat`；qoder 只调用前者。Windows 依赖系统自带 powershell.exe（零新依赖）。
+只导出 `decryptSafeStorageJson(filePath, opts)`。加密/写回能力已随千问办公 App 支持一并移除——仓库不再写任何 App 的登录态文件，仅 qoder 通道调用本模块**只读**拾取 `auth.v1.dat`。Windows 依赖系统自带 powershell.exe（零新依赖）。
 
 ### 3.9 signer.ts — 请求签名
 
@@ -403,7 +389,7 @@ DeviceFlowCredential { token, refreshToken, expiresAt, refreshTokenExpiresAt? }
 | `readEnvValue(key, root?)` | 读单键（缺失/空 → null），dotenv.parse |
 | `writeEnvValue(key, value, root?)` | 单行 upsert（保留其他行）+ mode 600 + chmod |
 
-消费方：`QWEN_KEYS`（refresh token 备份/自举）、`QWEN_MACHINE_ID`（设备标识）。log-in 与 log-in-app 两脚本共用。
+消费方：`QWEN_KEYS`（refresh token 备份/自举）、`QWEN_MACHINE_ID`（设备标识）、`QWEN_IDENTITY` / `QWEN_BIZ_TEAM_ID`（扣费身份）。
 
 ---
 
@@ -502,23 +488,19 @@ Router 对插件上游请求恒发占位值：`Authorization: Bearer xrl-router`
 | `QODER_KEYCHAIN_SERVICE` | `Qoder Safe Storage` | qoder macOS Keychain service（未真机验证） |
 | `QODER_KEYCHAIN_ACCOUNT` | `Qoder Key` | qoder macOS Keychain account（未真机验证） |
 | `QWEN_BASE_URL` | `https://gateway.qwenwork.cn` | 推理网关地址 |
-| `QWEN_OAUTH_TOKEN_PATH` | `~/Library/Application Support/QwenWorkCN/auth-v2.dat` | OAuth token 的文件路径 |
-| `QWEN_KEYCHAIN_SERVICE` | `QwenWorkCN Safe Storage` | macOS Keychain service 名 |
-| `QWEN_KEYCHAIN_ACCOUNT` | `QwenWorkCN Key` | macOS Keychain account 名 |
 | `QWEN_DEVICE_REFRESH_PATH` | `/api/v1/deviceToken/refresh` | token 刷新接口 |
 | `QWEN_DEVICE_POLL_PATH` | `/api/v1/deviceToken/poll` | 网页登录轮询接口（host 同 `QWEN_BASE_URL`） |
 | `QWEN_AUTH_BASE` | `https://gateway.qwenwork.cn` | device-flow 登录入口 origin（`/device/selectAccounts`） |
 | `QWEN_CLIENT_ID` | `e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb` | device-flow OAuth client_id（asar 常量） |
 | `QWEN_LOGIN_TIMEOUT_MS` | `300000` | 网页登录轮询总超时 |
 | `QWEN_MACHINE_ID` | *(空，自动生成持久化到 .env)* | device-flow 设备标识显式覆盖 |
-| `QWEN_USER_DATA_DIR` | `%APPDATA%/QwenWorkCN` 等 | Electron userData 目录（Windows 读 Local State 的 os_crypt 密钥） |
 | `QWEN_RSA_PUBLIC_KEY_PATH` | *(空，用内嵌公钥)* | RSA 公钥 PEM 文件路径（可选覆盖） |
 | `QWEN_REFRESH_INTERVAL_MS` | `600000` | token 自动刷新检查间隔（10min） |
 | `QWEN_TARGET` | `c` | deviceToken/refresh 的 target 参数（实测仅 `c` 合法，与扣费身份无关） |
 | `QWEN_IDENTITY` | `personal` | 扣费身份：`personal`=个人积分池（合法默认）/ `biz`=企业积分池 |
 | `QWEN_BIZ_TEAM_ID` | *(空)* | 企业模式指定 team（空=自动挑 `active` + 有套餐的组织）；见 `pnpm log-in --list-orgs` |
 | `QWEN_WEB_BASE` | `https://qwenwork.cn` | 网站域 origin（账户/组织/余额 API；这些端点在 gateway 域 404） |
-| `QWEN_KEYS` | *(空)* | 灾备 refresh token（`pnpm log-in` / `pnpm log-in:app` 备份的当前值） |
+| `QWEN_KEYS` | *(空)* | refresh token 当前值（`pnpm log-in` 备份，`getToken()` 自举源） |
 | `QWEN_MACHINE_ID`（.env 行） | 自动生成 | device-flow 设备标识（`pnpm log-in` 首跑写入） |
 
 ### 日志格式
@@ -529,6 +511,7 @@ Router 对插件上游请求恒发占位值：`Authorization: Bearer xrl-router`
 [PluginClient] Connected to xrl-router
 [PluginClient] Reconnecting in 2000ms (attempt 2)
 [qwenwork] token 已刷新（有效期至 2026-08-02T15:30:00.000Z）
+[qwenwork] 已用 QWEN_KEYS 自举刷新（有效期至 2026-08-02T15:30:00.000Z）
 [qwenwork] QWEN_KEYS 同步失败（不影响运行）: EACCES
 [qwenwork] 流读取失败: network timeout
 [qoder] 已加载 auth.v1.dat（有效期至 2026-11-19T02:58:20.000Z）
@@ -543,8 +526,9 @@ Router 对插件上游请求恒发占位值：`Authorization: Bearer xrl-router`
 ### 401 Unauthorized
 
 - 原因：OAuth token 已失效或刷新失败
-- 排查：确认 `auth-v2.dat` 存在且千问办公 App 已登录；或 `.env QWEN_KEYS` 有值
-- 修复：重新运行 `pnpm log-in`（网页扫码登录，无需 App）；装有 App 时也可运行 `pnpm log-in:app` 诊断 App 链路
+- 排查：`pnpm log-in --status` 看双池与凭据有效期；确认 `.env QWEN_KEYS` 有值
+- 修复：重新运行 `pnpm log-in`（网页扫码登录，全程无需 App）
+- `QWEN_IDENTITY=biz` 时的 401 另有一层含义：企业凭据不可用时**已拒绝降级**，不会改烧个人积分
 
 ### 550 / 上游错误
 
@@ -559,19 +543,13 @@ Router 对插件上游请求恒发占位值：`Authorization: Bearer xrl-router`
   2. 检查 xrl-router 的 `/ws/plugin` 端点是否可达
   3. 重连间隔最大 60s，连续失败时检查网络/firewall
 
-### auth-v2.dat 解密失败 (macOS)
-
-- 表现：`[qwenwork] auth-v2.dat 解密失败: auth 文件头不是 v10`
-- 原因：千问办公 App 未登录（文件不存在）或文件格式变更
-- 修复：打开千问办公 App 登录，触发 `auth-v2.dat` 重新生成；或依赖 `.env QWEN_KEYS` 自举
-
 ### token 所有源均失败
 
-- 表现：`无可用 token 源（auth-v2.dat 缺失/失效且 QWEN_KEYS 为空）`
+- 表现：`无可用 token 源（refresh token 均已失效，请运行 pnpm log-in 网页登录）`
 - 排查顺序：
-  1. 千问办公 App 是否已登录（`auth-v2.dat` 存在？）
-  2. `.env` 中 `QWEN_KEYS` 是否有值
-  3. macOS Keychain 中 `QwenWorkCN Safe Storage` 条目是否存在（`security find-generic-password -s "QwenWorkCN Safe Storage" -a "QwenWorkCN Key"`）
+  1. `.env` 中 `QWEN_KEYS` 是否有值（唯一持久源）
+  2. 该值是否已被服务端作废（refresh token 轮换式，旧值一次性的）
+  3. 重跑 `pnpm log-in` 重新扫码（无需任何 App）
 
 ### qoder 凭据不存在 / 已过期
 

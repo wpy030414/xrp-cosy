@@ -68,7 +68,7 @@
 **验收标准：**
 - access token 临近过期（提前 5 分钟）时自动调用 `deviceToken/refresh` 刷新
 - refresh token 刷新后自动同步到 `.env` 的 `QWEN_KEYS`（灾备源）
-- 三源回退：内存缓存 → `auth-v2.dat`（macOS Keychain / Windows DPAPI 解密）→ `.env QWEN_KEYS`（自举）
+- 两源回退：内存缓存 → `.env QWEN_KEYS`（自举）——均为 `pnpm log-in` 产出的网页 device-flow 凭据
 - 单飞防并发（同一时刻只有一个刷新请求）
 
 ### US-3：凭据自举
@@ -81,8 +81,7 @@
 - `pnpm log-in`：网页 device-flow 登录（浏览器 selectAccounts 扫码 + `deviceToken/poll` 轮询），全程无需 App 与本地回调
 - 轮询成功前校验 nonce + code_challenge 绑定；凭据备份到 `.env QWEN_KEYS`（mode 600，git-ignore 守卫）
 - 跟踪 `refresh_token_expires_at`，距过期 <24h 告警提示重登
-- `pnpm log-in:app`（App 链路，可选）：解密 `auth-v2.dat`（macOS Keychain / Windows DPAPI）+ 强制刷新 + 备份
-- 全程不依赖千问办公 App 运行（装有 App 时两条链路独立共存）
+- 全程不依赖千问办公 App 运行：插件不读取、也不写回 `auth-v2.dat`（App 链路支持已于 2026-10-20 移除，见 `docs/DECISIONS.md` D-16）
 
 ### US-4：故障自动恢复（WebSocket 重连）
 
@@ -131,7 +130,7 @@
 
 | 编号 | 功能 | 描述 |
 |------|------|------|
-| F-5 | 凭据获取与刷新 | `pnpm log-in`：网页 device-flow 扫码登录（无需 App）+ 验证刷新链 + 备份 `QWEN_KEYS`；`pnpm log-in:app`：App 链路（auth-v2.dat 解密）诊断 |
+| F-5 | 凭据获取与刷新 | `pnpm log-in`：网页 device-flow 扫码登录（唯一凭据来源，无需 App）+ 验证刷新链 + 备份 `QWEN_KEYS`；只读模式 `--status`（扣费身份/双池余额诊断）、`--list-orgs`（企业组织可用性） |
 
 ### 4.3 辅助功能（P2）
 
@@ -159,9 +158,9 @@
 
 ### 5.3 安全性
 
-- `.env` 与密钥永不进 git（`.gitignore` 强制，`capture-key` 脚本预检）
+- `.env` 与密钥永不进 git（`.gitignore` 强制，`pnpm log-in` 与 `src/envStore.ts` 写入前双重守卫）
 - `.env` 文件权限 600（仅属主可读写）
-- 仅对本机、本人已登录的 App 抓密钥（授权的本地分析）
+- 仅使用本机、本人扫码获得的凭据（不涉及第三方凭据；qoder 通道只读本人 App 登录态）
 
 ### 5.4 兼容性
 
@@ -187,7 +186,7 @@
 |------|------|------|
 | xrl-router | 上游路由层 | 必须运行在 `http://localhost:19068` |
 | gateway.qwenwork.cn | 后端推理网关 | `https://gateway.qwenwork.cn` |
-| 千问办公 App | token 来源（可选） | 不再必需：`pnpm log-in` 网页扫码即可自举凭据；App 链路走 `auth-v2.dat` |
+| 千问办公 App | 无（已取消支持） | 凭据完全由 `pnpm log-in` 网页 device-flow 自举，插件不读写 `auth-v2.dat` |
 
 ---
 
@@ -196,9 +195,8 @@
 | 风险 | 影响 | 缓解措施 |
 |------|------|----------|
 | xrl-router 断线 | 插件无法注册 | 自动重连（指数退避 1s~60s）+ 心跳保活 30s |
-| OAuth token 刷新失败 | 通道不可用 | 三源回退：内存缓存 → `auth-v2.dat`（Keychain / DPAPI）→ `.env QWEN_KEYS`（自举） |
-| Keychain 授权拒绝（macOS） | token 解密失败 | 脚本提示用户点「允许」 |
-| Windows DPAPI 解密失败 | token 解密失败 | 检查 auth-v2.dat 是否来自同一 Windows 用户 |
+| OAuth token 刷新失败 | 通道不可用 | 两源回退：内存缓存 → `.env QWEN_KEYS`（自举）；均失效则提示重跑 `pnpm log-in` |
+| 企业凭据不可用（`QWEN_IDENTITY=biz`） | 请求 401 | 刻意拒绝降级到个人积分（避免「以为烧企业、实际烧个人」），需修复席位/套餐或重登 |
 
 ---
 
@@ -223,8 +221,8 @@
 | xrl-router | 统一的 LLM 路由层，负责密钥管理、请求分发、重试逻辑 |
 | gateway.qwenwork.cn | 千问办公推理网关 |
 | Cosy | 千问办公网关的签名体系：RSA 加密随机 AES key + AES 加密 userInfo + MD5 请求签名 |
-| safeStorage | Electron 的加密 API，macOS 走 Keychain + PBKDF2 + AES-128-CBC，Windows 走 DPAPI |
-| auth-v2.dat | 千问办公的登录态文件，safeStorage 加密存储 OAuth token + refresh token |
+| safeStorage | Electron 的加密 API，macOS 走 Keychain + PBKDF2 + AES-128-CBC，Windows 走 DPAPI（本仓库仅 qoder 通道只读解密） |
+| auth-v2.dat | 千问办公 App 的登录态文件（**本插件已不再读写**，App 链路支持已移除） |
 | refresh token | `ory_rt_` 前缀的令牌，用于 `deviceToken/refresh` 换取新 access token（轮换式） |
 | V24 契约 | xrl-router 插件系统 V24 版本，废除 keys 字段、要求 Hono 框架 |
 | plugin_id | 插件在 xrl-router 中的注册标识：`plugin-qwenwork` |

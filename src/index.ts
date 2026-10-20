@@ -6,11 +6,8 @@
  */
 
 import { settings } from './config';
-import { initTokenManager } from './auth';
 import { forwardChatCompletions, displayName } from './client';
 import { startPluginServer } from './server';
-
-initTokenManager();
 
 export default startPluginServer({
   pluginId: 'plugin-qwenwork',
