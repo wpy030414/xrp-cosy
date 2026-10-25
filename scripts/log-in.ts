@@ -190,7 +190,7 @@ export async function main(): Promise<void> {
   }
   const identity = (identityRaw ?? 'personal') as 'biz' | 'personal';
 
-  console.log('🔑 xrl-router-plugin-qwenwork · 网页登录（device flow，无需千问办公 App）\n');
+  console.log('🔑 xrp-cosy · qwenwork 网页登录（device flow，无需千问办公 App）\n');
 
   const handles = buildDeviceLoginParams(REPO_ROOT);
   const url = buildAuthUrl(handles);

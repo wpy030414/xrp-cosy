@@ -65,15 +65,15 @@
 `src/bizIdentity.ts` 用根凭据派生企业 JWT（见 `docs/specs/qwenwork-device-login.md` §7、`DECISIONS.md` D-15）。
 两条链独立：根凭据刷新不影响已派生的企业凭据，反之亦然。
 
-### safeStorage 格式参考（本通道已不使用）
+### safeStorage 格式参考（历史记录，代码已删除）
 
-千问办公 / Qoder 的登录态文件都是 Electron safeStorage（`v10` 头），本仓库仍需在 **qoder 通道只读解密** `auth.v1.dat`：
+千问办公 / Qoder 的登录态文件都曾是 Electron safeStorage（`v10` 头）。**本仓库已不包含任何解密/写回代码**（D-16 移除 qwenwork App 链路，D-17 移除 qoder App 链路），以下仅作历史参考：
 
 - **通用**：前 3 字节必须是 `v10`（自动剥离 UTF-8 BOM 容错）
 - **macOS**：Keychain 取密码（`security find-generic-password`，去尾换行）→ `PBKDF2(pw, "saltysalt", 1003, 16, sha1)` → `AES-128-CBC(IV=0x20×16)`
 - **Windows**：`Local State` 的 `os_crypt.encrypted_key` → base64 → 去 `DPAPI\0` 前缀 → PowerShell `ProtectedData.Unprotect`（entropy=NULL，CurrentUser）→ 32B AES key → `AES-256-GCM`（`v10` 后 = 12B nonce + 密文 + 16B tag）
 
-实现位于共享模块 `src/safeStorage.ts`。**加密（写回）能力已随 App 支持移除**，该模块现在只导出解密函数。
+qoder 现在的凭据来源见 [qoder-device-login](./qoder-device-login.md)。
 
 ## 验收标准
 

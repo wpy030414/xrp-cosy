@@ -2,32 +2,16 @@
  * qoderConfig.ts — Qoder 通道配置（与 qwenwork 独立端口/模型/凭据）。
  *
  * Qoder 与 qwenwork 网关同协议族，但账号体系独立：
- * - 推理：api3.qoder.sh（同样的 /algo/.../agent_chat_generation + Cosy 签名）
- * - 凭据：Qoder App 的 auth.v1.dat（Electron safeStorage）
+ * - 推理：api3.qoder.sh（Cosy 签名，国际版 Qoder 的推理主机）
+ * - 凭据：openapi.qoder.sh 的设备授权（PKCE S256 + deviceToken/poll）
+ *
+ * 凭据由插件自持并自行轮换（`.env QODER_KEYS` 只保存 refresh token），
+ * 不读取、不写回任何 Qoder App 文件 —— 与「仅自包含网页 OAuth 登录」边界一致。
  */
 
 import dotenv from 'dotenv';
-import os from 'node:os';
-import path from 'node:path';
 
 dotenv.config();
-
-/** Qoder 默认 Electron userData 目录（Windows %APPDATA% / macOS Application Support） */
-function detectQoderUserDataDir(): string {
-  const envVal = process.env.QODER_USER_DATA_DIR;
-  if (envVal) return envVal;
-  if (process.platform === 'win32') {
-    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-    return path.join(appData, 'com.qoder.app.stable');
-  }
-  return path.join(os.homedir(), 'Library', 'Application Support', 'com.qoder.app.stable');
-}
-
-function detectQoderTokenPath(): string {
-  const envVal = process.env.QODER_OAUTH_TOKEN_PATH;
-  if (envVal) return envVal;
-  return path.join(detectQoderUserDataDir(), 'auth.v1.dat');
-}
 
 function env(key: string, fallback: string): string {
   const v = process.env[key];
@@ -37,11 +21,20 @@ function env(key: string, fallback: string): string {
 export interface QoderSettings {
   port: number;
   availableModels: string[];
-  baseUrl: string;
-  oauthTokenPath: string;
-  userDataDir: string;
-  keychainService: string;
-  keychainAccount: string;
+
+  // —— Qoder 通道（api3.qoder.sh）——
+  baseUrl: string;              // 推理网关 base
+  oauthBaseUrl: string;         // 设备授权/令牌 API base（openapi.qoder.sh）
+  authBaseUrl: string;          // 网页授权页 origin（/device/selectAccounts）
+  clientId: string;             // 设备授权 OAuth client_id（官方客户端常量）
+  devicePollPath: string;       // deviceToken/poll 相对路径
+  deviceRefreshPath: string;    // deviceToken/refresh 相对路径
+  userInfoPath: string;         // userinfo 相对路径（登录后展示账号）
+  loginTimeoutMs: number;       // 设备授权轮询总超时
+  machineId: string;            // 设备标识显式覆盖（空 = 自动生成并持久化到 .env）
+  userAgent: string;            // 登录/刷新请求的 UA（对齐官方 CLI 流量）
+
+  // —— xrl-router 集成配置 ——
   xrlRouterUrl: string;
 }
 
@@ -54,11 +47,15 @@ export const qoderSettings: QoderSettings = {
     .filter(Boolean),
 
   baseUrl: env('QODER_BASE_URL', 'https://api3.qoder.sh'),
-  oauthTokenPath: detectQoderTokenPath(),
-  userDataDir: detectQoderUserDataDir(),
-  // macOS Keychain 名称未在真机验证；可用 QODER_KEYCHAIN_* 覆盖
-  keychainService: env('QODER_KEYCHAIN_SERVICE', 'Qoder Safe Storage'),
-  keychainAccount: env('QODER_KEYCHAIN_ACCOUNT', 'Qoder Key'),
+  oauthBaseUrl: env('QODER_OAUTH_BASE', 'https://openapi.qoder.sh'),
+  authBaseUrl: env('QODER_AUTH_BASE', 'https://qoder.com'),
+  clientId: env('QODER_CLIENT_ID', 'e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb'),
+  devicePollPath: env('QODER_DEVICE_POLL_PATH', '/api/v1/deviceToken/poll'),
+  deviceRefreshPath: env('QODER_DEVICE_REFRESH_PATH', '/api/v1/deviceToken/refresh'),
+  userInfoPath: env('QODER_USERINFO_PATH', '/api/v1/userinfo'),
+  loginTimeoutMs: parseInt(env('QODER_LOGIN_TIMEOUT_MS', '300000'), 10),
+  machineId: env('QODER_MACHINE_ID', ''),
+  userAgent: env('QODER_LOGIN_UA', 'QoderWork/1.1.75'),
 
   xrlRouterUrl: env('XRL_ROUTER_URL', 'http://localhost:19068'),
 };

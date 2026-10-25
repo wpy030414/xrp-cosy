@@ -1,109 +1,144 @@
 #!/usr/bin/env tsx
 /**
- * log-in-qoder.ts — qoder 渠道的凭据入口：App 登录态拾取 + 诊断（**全程只读**）。
+ * log-in-qoder.ts — qoder 渠道的凭据入口：自包含网页 OAuth 设备授权（无需 Qoder App）。
  *
- * qoder 与 qwenwork 的凭据模型不同：本渠道**没有** device-flow 登录，登录态由 Qoder App
- * 自己维护（`auth.v1.dat`，Electron safeStorage），refresh token 的轮换权归 App。
- * 所以这里的「log-in」= 确认插件能不能读到一份有效凭据，并把不可读的原因分级说清楚。
+ *   pnpm log-in:qoder            打开浏览器完成登录，凭据落 .env QODER_KEYS（refresh token）
+ *   pnpm log-in:qoder --status   只读诊断：当前凭据能否刷新、有效期与账号信息
+ *   pnpm log-in:qoder --no-browser  只打印授权链接，不自动打开浏览器
  *
- *   pnpm log-in:qoder            诊断 Qoder 登录态 + 打印将注册的模型列表
- *
- * 只读承诺（AGENTS.md 边界，脚本自身可验证）：
- * - 只调用 `decryptSafeStorageJson`（读），绝不调用任何写接口，绝不 refresh 上游
- * - 运行前后对比 `auth.v1.dat` 的 mtime，若发生变化则**报错退出**——证明本次运行没碰过 App 文件
+ * 流程：
+ * 1. 生成 PKCE S256 + nonce(32-hex) + machineId → 拼 qoder.com/device/selectAccounts
+ * 2. 浏览器完成登录（登录页由 qoder.com 托管，插件不经手口令、不监听本地回调）
+ * 3. 轮询 openapi.qoder.sh/api/v1/deviceToken/poll 取 {token, refresh_token}
+ * 4. adopt → forceRefresh 验证轮换链 → QODER_KEYS 写入 .env
  */
 
-import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { qoderSettings } from '../src/qoderConfig';
-import { getQoderToken } from '../src/qoderAuth';
-import { displayName } from '../src/qoderClient';
+import { adoptQoderCredential, fetchQoderUserInfo, forceRefreshQoder, getQoderToken, type QoderTokenState } from '../src/qoderAuth';
+import { QoderDeviceFlowError, runQoderDeviceLogin } from '../src/qoderDeviceLogin';
+import { writeEnvValue } from '../src/envStore';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, '../');
 
 const ok = (s: string): void => console.log(`✅ ${s}`);
 const fail = (s: string): void => console.error(`\n❌ ${s}`);
 const mask = (s: string): string => (s && s.length > 12 ? `${s.slice(0, 8)}…${s.slice(-4)}` : '(无效)');
+const fmtTime = (ms: number): string => (ms > 0 ? new Date(ms).toISOString() : '未知');
 
-/** 已知展示名映射的候选挡位（与 src/qoderClient.ts DISPLAY_NAMES 对齐；诊断脚本内联一份避免动生产代码） */
-const KNOWN_MODELS = ['qfmodel', 'dfmodel', 'gfmodel', 'dmodel', 'mmodel'];
+const hasFlag = (name: string): boolean => process.argv.includes(name);
 
-/** 只读：文件指纹（不存在则 null） */
-function fingerprint(): { mtimeMs: number; size: number } | null {
-  try {
-    const st = fs.statSync(qoderSettings.oauthTokenPath);
-    return { mtimeMs: st.mtimeMs, size: st.size };
-  } catch { return null; }
-}
-
-function printEnvHint(): void {
+function printConfig(): void {
   console.log('配置');
-  console.log(`  登录态文件 = ${qoderSettings.oauthTokenPath}`);
-  console.log(`  userData   = ${qoderSettings.userDataDir}`);
-  if (process.platform === 'darwin') {
-    console.log(`  Keychain   = ${qoderSettings.keychainService} / ${qoderSettings.keychainAccount}`);
-  }
-  console.log('  可用 env 覆盖：QODER_OAUTH_TOKEN_PATH · QODER_USER_DATA_DIR · QODER_KEYCHAIN_SERVICE · QODER_KEYCHAIN_ACCOUNT\n');
+  console.log(`  授权页   = ${qoderSettings.authBaseUrl}/device/selectAccounts`);
+  console.log(`  令牌 API = ${qoderSettings.oauthBaseUrl}`);
+  console.log(`  推理网关 = ${qoderSettings.baseUrl}`);
+  console.log(`  client_id = ${qoderSettings.clientId}`);
+  console.log('  可用 env 覆盖：QODER_OAUTH_BASE · QODER_AUTH_BASE · QODER_CLIENT_ID · QODER_MACHINE_ID\n');
 }
 
-function printModels(): void {
-  const list = qoderSettings.availableModels;
-  console.log(`将注册给 xrl-router 的模型（${list.length} 个，QODER_MODELS 可覆盖）：`);
-  for (const m of list) console.log(`  ${m}  →  ${displayName(m)}`);
-  const extras = KNOWN_MODELS.filter((m) => !list.includes(m));
-  if (extras.length) {
-    console.log(`  （另有已知的未启用挡位：${extras.map((m) => `${m}=${displayName(m)}`).join('、')}）`);
+function printCredential(state: QoderTokenState): void {
+  console.log('凭据');
+  console.log(`  access token  = ${mask(state.token)}  有效期至 ${fmtTime(state.expiresAt)}`);
+  console.log(`  refresh token = ${mask(state.refreshToken)}` +
+    (state.refreshTokenExpiresAt ? `  有效期至 ${fmtTime(state.refreshTokenExpiresAt)}` : ''));
+  if (state.user.uid || state.user.name) {
+    const org = state.user.orgName ? `  组织=${state.user.orgName}` : '';
+    console.log(`  账号 = ${state.user.name ?? '?'}（${state.user.uid || '?'}）${state.user.userType ? `  ${state.user.userType}` : ''}${org}`);
   }
   console.log('');
 }
 
-async function main(): Promise<void> {
-  console.log('🔑 xrl-router-plugin · qoder 渠道凭据诊断（只读，不刷新、不写回）\n');
-  printEnvHint();
-  printModels();
-
-  const before = fingerprint();
-  if (!before) {
-    fail(`未找到 Qoder 登录态：${qoderSettings.oauthTokenPath}`);
-    console.error('   → 请打开 Qoder App 完成登录（首次登录会生成 auth.v1.dat），再重跑本命令');
-    console.error('   → 或登录的是别的目录：用 QODER_OAUTH_TOKEN_PATH 指定 auth.v1.dat');
-    process.exitCode = 1;
-    return;
-  }
-  console.log(`▶ 解密 ${qoderSettings.oauthTokenPath}（若弹钥匙串授权请点「允许」）…`);
-
-  let state;
+/** --status：只读诊断（会按需刷新；刷新成功即代表凭据链可用） */
+async function statusMode(): Promise<boolean> {
+  printConfig();
   try {
-    state = await getQoderToken();
+    const state = await getQoderToken();
+    ok('凭据可用（刷新链正常）');
+    printCredential(state);
+    return true;
   } catch (e: any) {
-    fail(`读取失败：${e.message}`);
-    if (/已过期/.test(e.message)) {
-      console.error('   → 本通道只读凭据，不能替 App 刷新：打开 Qoder App 让它重新登录续期，再重跑');
-    } else if (/v10|safeStorage|Keychain|DPAPI|powershell/.test(e.message)) {
-      console.error('   → 解密失败：确认登录态来自本机同一用户；macOS 需在钥匙串弹窗点「允许」，');
-      console.error('     或本机 Qoder 的 Keychain 条目名不同，用 QODER_KEYCHAIN_SERVICE/ACCOUNT 覆盖');
-    } else {
-      console.error('   → 排查：Qoder App 是否已登录？auth.v1.dat 是否被别的账号覆盖过？');
-    }
-    process.exitCode = 1;
-    return;
+    fail(`凭据不可用：${e.message}`);
+    console.log('   修复：运行 pnpm log-in:qoder 重新完成网页登录');
+    return false;
   }
-
-  ok(`登录用户：${state.user.name || state.user.uid}（${state.user.email || '无邮箱'}）`);
-  console.log(`   access token：${mask(state.token)}（前缀 ${state.token.slice(0, 3)}，opaque，非 JWT）`);
-  console.log(`   有效期至：${state.expiresAt > 0 ? new Date(state.expiresAt).toISOString() : '未知'}` +
-    `  ${state.expiresAt > Date.now() ? '（剩余 ' + Math.round((state.expiresAt - Date.now()) / 3600_000) + 'h）' : '（已过期）'}`);
-  if (state.refreshTokenExpiresAt) {
-    console.log(`   refresh token 有效期至：${new Date(state.refreshTokenExpiresAt).toISOString()}（轮换权归 Qoder App，插件不消费）`);
-  }
-
-  // 只读自证：mtime/size 未变 = 本次运行没写过 App 的登录态文件
-  const after = fingerprint();
-  if (!after || before.mtimeMs !== after.mtimeMs || before.size !== after.size) {
-    fail('auth.v1.dat 在本次运行中发生了变化——违反只读边界，请检查是否有其他进程（Qoder App 自身刷新）在写');
-    process.exitCode = 1;
-    return;
-  }
-  ok('只读校验通过：auth.v1.dat 的 mtime/size 未变化（本命令未写入任何 App 文件）');
-
-  console.log('\n🎉 qoder 通道凭据可用，`pnpm serve:qoder` 即可启动（默认端口 %d）。', qoderSettings.port);
 }
 
-main().catch((e) => { fail(`未捕获异常：${e.message}`); process.exit(1); });
+/** 登录主流程 */
+async function loginMode(openBrowser: boolean): Promise<boolean> {
+  printConfig();
+  console.log('正在申请设备授权…（浏览器完成登录后会自动继续）\n');
+
+  let lastProgressAt = 0;
+  let credential;
+  try {
+    credential = await runQoderDeviceLogin({
+      openBrowser,
+      repoRoot: REPO_ROOT,
+      onAuthUrl: (url) => {
+        console.log('请登录以下地址（已尝试自动打开浏览器）：');
+        console.log(`  ${url}\n`);
+        if (!openBrowser) console.log('（--no-browser：请手动复制上面的链接到浏览器）\n');
+      },
+      onWait: (elapsed) => {
+        if (elapsed - lastProgressAt >= 10_000) {
+          lastProgressAt = elapsed;
+          console.log(`  …等待授权完成（${Math.round(elapsed / 1000)}s）`);
+        }
+      },
+    });
+  } catch (e: any) {
+    if (e instanceof QoderDeviceFlowError) fail(e.message);
+    else fail(`登录失败：${e.message}`);
+    return false;
+  }
+
+  ok('网页授权完成，已取得凭据');
+
+  const user = await fetchQoderUserInfo(credential.token);
+  const state: QoderTokenState = {
+    token: credential.token,
+    refreshToken: credential.refreshToken,
+    user: user ?? { uid: '' },
+    expiresAt: credential.expiresAt,
+    refreshTokenExpiresAt: credential.refreshTokenExpiresAt,
+  };
+  adoptQoderCredential(state);
+
+  // 先落盘原始 refresh token：即使下一步验证失败，凭据也不丢
+  if (!writeEnvValue('QODER_KEYS', state.refreshToken, REPO_ROOT)) {
+    fail('QODER_KEYS 写入 .env 失败（.env 未被 git 忽略？），凭据仅存活于本次进程');
+    return false;
+  }
+  ok('QODER_KEYS 已写入 .env（已 git-ignore 守卫）');
+
+  // 验证刷新链：成功后 refresh token 轮换，并同步回 .env
+  let refreshed: QoderTokenState;
+  try {
+    refreshed = await forceRefreshQoder();
+    ok('刷新链验证通过（refresh token 已轮换并同步 .env）');
+  } catch (e: any) {
+    fail(`刷新链验证失败：${e.message}`);
+    console.log('   原始凭据已保存；若服务运行中 token 到期，请重新运行 pnpm log-in:qoder');
+    return false;
+  }
+
+  printCredential(refreshed);
+  ok('登录完成。启动 qoder 通道：pnpm serve:qoder');
+  return true;
+}
+
+async function main(): Promise<void> {
+  if (hasFlag('--status')) {
+    process.exitCode = (await statusMode()) ? 0 : 1;
+    return;
+  }
+  process.exitCode = (await loginMode(!hasFlag('--no-browser'))) ? 0 : 1;
+}
+
+main().catch((e) => {
+  fail(`未预期的错误：${e?.stack ?? e}`);
+  process.exitCode = 1;
+});

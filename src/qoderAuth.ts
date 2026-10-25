@@ -1,133 +1,220 @@
 /**
- * qoderAuth.ts — Qoder 凭据管理（只读）。
+ * qoderAuth.ts — Qoder token 管理（自包含网页登录凭据，无 Qoder App 依赖）。
  *
- * Qoder App 将登录态写在 userData/auth.v1.dat（Electron safeStorage v10）：
- *   { schemaVersion, token, refreshToken, expiresAt, refreshTokenExpiresAt, user: { id, name, email, ... } }
+ * 凭据来源只有两条：
+ *   ① 内存缓存里的 drt- refresh token → deviceToken/refresh 轮换
+ *   ② .env QODER_KEYS（pnpm log-in:qoder 备份的 refresh token）→ 自举刷新
+ * 两条都由 `pnpm log-in:qoder`（openapi.qoder.sh 设备授权，PKCE S256）产出，
+ * 插件不读取、不写回任何 Qoder App 文件。
  *
- * 设计：插件只读取、不刷新、不写回。
- * - Qoder access token 有效期约 30 天，由 Qoder App 自己轮换并写回文件
- * - 插件监听文件变化自动拾取新 token，避免与 App 的 refresh token 轮换互踩
- * - token 过期时提示用户打开 Qoder App 刷新登录
+ * 刷新：POST {oauthBase}/api/v1/deviceToken/refresh，body {refresh_token}
+ * - refresh token 每次刷新都会轮换（drt- 前缀），轮换值同步回 .env QODER_KEYS
+ * - access token 有效期约 30 天；refresh token 约 1 年
  */
 
-import fs from 'node:fs';
 import { qoderSettings } from './qoderConfig';
-import { decryptSafeStorageJson, type SafeStorageOptions } from './safeStorage';
+import { readEnvValue, writeEnvValue } from './envStore';
+
+export interface QoderUserInfo {
+  uid: string;
+  name?: string;
+  email?: string;
+  userType?: string;
+  orgId?: string;
+  orgName?: string;
+}
 
 export interface QoderTokenState {
   /** opaque access token（dt- 前缀） */
   token: string;
-  /** opaque refresh token（drt- 前缀；本通道不消费） */
+  /** opaque refresh token（drt- 前缀，deviceToken/refresh 轮换） */
   refreshToken: string;
-  user: { uid: string; name?: string; email?: string };
+  user: QoderUserInfo;
   /** access token 过期时间（ms epoch） */
   expiresAt: number;
+  /** refresh token 过期时间（ms epoch；服务端未告知时为 undefined） */
   refreshTokenExpiresAt?: number;
-  /** 原始解密 JSON（只读保留） */
-  raw: any;
 }
 
-function qoderSafeStorageOptions(): SafeStorageOptions {
-  return {
-    userDataDir: qoderSettings.userDataDir,
-    keychainService: qoderSettings.keychainService,
-    keychainAccount: qoderSettings.keychainAccount,
-  };
-}
+/** deviceToken 响应的 expires_in 是毫秒（官方实测）；极小值按秒兜底 */
+const EXPIRES_IN_MS_THRESHOLD = 1e8;
+const DEFAULT_ACCESS_TTL_MS = 30 * 24 * 3600_000;
 
-function decryptQoderAuthFile(filePath: string): QoderTokenState {
-  const json = decryptSafeStorageJson(filePath, qoderSafeStorageOptions());
-  if (typeof json.token !== 'string' || !json.token) {
-    throw new Error('auth.v1.dat 缺少 token（Qoder App 未登录？）');
+/** 解析 access/refresh token 过期时间（expires_at RFC3339 优先，其次 expires_in） */
+export function parseDeviceExpiry(
+  expiresAtRaw: unknown,
+  expiresInRaw: unknown,
+  fallbackMs: number,
+): number {
+  if (typeof expiresAtRaw === 'string') {
+    const t = Date.parse(expiresAtRaw);
+    if (!Number.isNaN(t) && t > 0) return t;
   }
-  const expiresAt = typeof json.expiresAt === 'string' ? Date.parse(json.expiresAt) : 0;
-  const refreshTokenExpiresAt = typeof json.refreshTokenExpiresAt === 'string'
-    ? Date.parse(json.refreshTokenExpiresAt)
-    : undefined;
-  return {
-    token: json.token,
-    refreshToken: typeof json.refreshToken === 'string' ? json.refreshToken : '',
-    user: {
-      uid: json.user?.id ?? '',
-      name: json.user?.name,
-      email: json.user?.email,
-    },
-    expiresAt: Number.isNaN(expiresAt) ? 0 : expiresAt,
-    refreshTokenExpiresAt: refreshTokenExpiresAt && !Number.isNaN(refreshTokenExpiresAt) ? refreshTokenExpiresAt : undefined,
-    raw: json,
-  };
+  if (typeof expiresInRaw === 'number' && Number.isFinite(expiresInRaw) && expiresInRaw > 0) {
+    return Date.now() + (expiresInRaw >= EXPIRES_IN_MS_THRESHOLD ? expiresInRaw : expiresInRaw * 1000);
+  }
+  return Date.now() + fallbackMs;
 }
 
-let cached: QoderTokenState | null = null;
-
-// —— auth.v1.dat 文件监听（Qoder App 刷新时自动拾取） ——
-let authWatcher: fs.FSWatcher | null = null;
-let watchDebounce: NodeJS.Timeout | null = null;
-let lastKnownMtime = 0;
-
-function startAuthFileWatch(): void {
-  if (authWatcher || !fs.existsSync(qoderSettings.oauthTokenPath)) return;
-  try {
-    lastKnownMtime = fs.statSync(qoderSettings.oauthTokenPath).mtimeMs;
-    authWatcher = fs.watch(qoderSettings.oauthTokenPath, () => {
-      if (watchDebounce) clearTimeout(watchDebounce);
-      watchDebounce = setTimeout(() => {
-        watchDebounce = null;
-        try {
-          const stat = fs.statSync(qoderSettings.oauthTokenPath);
-          if (stat.mtimeMs === lastKnownMtime) return;
-          lastKnownMtime = stat.mtimeMs;
-          console.log('[qoder] auth.v1.dat 已更新（Qoder App 刷新了 token），重新读取…');
-          const fresh = decryptQoderAuthFile(qoderSettings.oauthTokenPath);
-          cached = fresh;
-          console.log(`[qoder] 已拾取新 token（有效期至 ${new Date(fresh.expiresAt).toISOString()}）`);
-        } catch (e: any) {
-          console.warn(`[qoder] auth.v1.dat 重读失败: ${e.message}`);
-        }
-      }, 1000);
-    });
-    authWatcher.on('error', (err) => {
-      console.warn(`[qoder] auth.v1.dat 监听异常: ${err.message}，将重启监听`);
-      authWatcher = null;
-      setTimeout(startAuthFileWatch, 5000);
-    });
-    console.log(`[qoder] 已启动 auth.v1.dat 监听（${qoderSettings.oauthTokenPath}）`);
-  } catch (e: any) {
-    console.warn(`[qoder] 启动 auth.v1.dat 监听失败: ${e.message}`);
-  }
+function parseOptionalExpiry(expiresAtRaw: unknown, expiresInRaw: unknown): number | undefined {
+  const hasAt = typeof expiresAtRaw === 'string' && !Number.isNaN(Date.parse(expiresAtRaw));
+  const hasIn = typeof expiresInRaw === 'number' && Number.isFinite(expiresInRaw) && expiresInRaw > 0;
+  if (!hasAt && !hasIn) return undefined;
+  return hasAt
+    ? Date.parse(expiresAtRaw as string)
+    : parseDeviceExpiry(undefined, expiresInRaw, DEFAULT_ACCESS_TTL_MS);
 }
 
 /**
- * 获取当前有效 token（只读：缓存 + 文件重读）。
- * 不做 refresh：Qoder App 拥有 refresh token 的轮换权，插件写回会与其互踩。
+ * 拉取账号信息（best-effort）。
+ *
+ * qoder access token 是 opaque token（非 JWT），uid 只能从 userinfo 取；
+ * 签名链的 `Cosy-User` / `info.uid` 依赖它，因此在 uid 未知时补一次。
  */
-export async function getQoderToken(): Promise<QoderTokenState> {
-  if (cached && cached.expiresAt > 0 && Date.now() < cached.expiresAt - 5 * 60_000) {
-    return cached;
+export async function fetchQoderUserInfo(token: string): Promise<QoderUserInfo | null> {
+  try {
+    const url = `${qoderSettings.oauthBaseUrl}${qoderSettings.userInfoPath}`;
+    const res = await fetch(url, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': qoderSettings.userAgent,
+        Authorization: `Bearer ${token}`,
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return null;
+    const j = await res.json() as any;
+    return {
+      uid: String(j.id ?? j.user_id ?? ''),
+      name: j.name ? String(j.name) : undefined,
+      email: j.email ? String(j.email) : undefined,
+      userType: j.user_type ? String(j.user_type) : undefined,
+      orgId: j.organization_id ? String(j.organization_id) : undefined,
+      orgName: j.organization_name ? String(j.organization_name) : undefined,
+    };
+  } catch {
+    return null;
   }
-  if (fs.existsSync(qoderSettings.oauthTokenPath)) {
-    const fresh = decryptQoderAuthFile(qoderSettings.oauthTokenPath);
-    cached = fresh;
-    if (fresh.expiresAt > 0 && Date.now() < fresh.expiresAt - 5 * 60_000) {
-      return fresh;
-    }
-    const when = fresh.expiresAt > 0 ? new Date(fresh.expiresAt).toISOString() : '未知';
-    throw new Error(`Qoder access token 已过期（${when}）。本插件只读凭据，请打开 Qoder App 刷新登录后重试`);
-  }
-  throw new Error(`未找到 Qoder 登录态（${qoderSettings.oauthTokenPath}）。请先登录 Qoder App，或用 QODER_OAUTH_TOKEN_PATH 指定 auth.v1.dat`);
 }
 
-/** 初始化凭据管理（启动时调用：加载初始 token + 启动文件监听） */
-export function initQoderTokenManager(): void {
-  if (fs.existsSync(qoderSettings.oauthTokenPath)) {
-    try {
-      cached = decryptQoderAuthFile(qoderSettings.oauthTokenPath);
-      console.log(`[qoder] 已加载 auth.v1.dat（有效期至 ${new Date(cached.expiresAt).toISOString()}）`);
-    } catch (e: any) {
-      console.warn(`[qoder] auth.v1.dat 读取失败: ${e.message}`);
-    }
+/** uid 未知时补全账号信息（失败不阻塞刷新） */
+async function ensureUserInfo(state: QoderTokenState): Promise<QoderTokenState> {
+  if (state.user.uid) return state;
+  const info = await fetchQoderUserInfo(state.token);
+  if (info?.uid) {
+    state.user = info;
   } else {
-    console.warn(`[qoder] 未找到 auth.v1.dat（${qoderSettings.oauthTokenPath}），请先登录 Qoder App`);
+    console.warn('[qoder] 未能取得账号 uid（userinfo 不可用）；签名头 Cosy-User 将为空');
   }
-  startAuthFileWatch();
+  return state;
+}
+
+function syncEnvRefreshToken(refreshToken: string): void {
+  if (!writeEnvValue('QODER_KEYS', refreshToken)) {
+    console.warn('[qoder] QODER_KEYS 未能写入 .env（git-ignore 守卫未通过），刷新 token 仅存活于本次进程');
+  }
+}
+
+/** deviceToken/refresh：换取新 token + 轮换 refresh token + 同步 .env */
+export async function refreshQoderToken(refreshToken: string): Promise<QoderTokenState> {
+  const url = `${qoderSettings.oauthBaseUrl}${qoderSettings.deviceRefreshPath}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'User-Agent': qoderSettings.userAgent,
+    },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  if (!res.ok) {
+    throw new Error(`deviceToken/refresh 失败: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+  }
+  const j = await res.json() as any;
+  const token = j.device_token ?? j.token;
+  if (typeof token !== 'string' || !token) {
+    throw new Error('deviceToken/refresh 响应缺 device_token/token');
+  }
+  const rt = typeof j.refresh_token === 'string' && j.refresh_token ? j.refresh_token : refreshToken;
+  const expiresAt = parseDeviceExpiry(j.expires_at, j.expires_in, DEFAULT_ACCESS_TTL_MS);
+  const refreshTokenExpiresAt = parseOptionalExpiry(j.refresh_token_expires_at, j.refresh_token_expires_in);
+
+  syncEnvRefreshToken(rt);
+  const next: QoderTokenState = {
+    token,
+    refreshToken: rt,
+    user: cached?.user ?? { uid: '' },
+    expiresAt,
+    refreshTokenExpiresAt,
+  };
+  if (refreshTokenExpiresAt && refreshTokenExpiresAt < Date.now() + 24 * 3600_000) {
+    console.warn(`[qoder] refresh token 将于 ${new Date(refreshTokenExpiresAt).toISOString()} 过期（不足 24h），请重跑 pnpm log-in:qoder`);
+  }
+  return ensureUserInfo(next);
+}
+
+// —— token 缓存与自动刷新 ——
+let cached: QoderTokenState | null = null;
+let refreshing: Promise<QoderTokenState> | null = null;
+
+/** 获取当前有效 token（缓存 + 临近过期自动刷新，单飞防并发） */
+export async function getQoderToken(): Promise<QoderTokenState> {
+  if (cached && Date.now() < cached.expiresAt - 5 * 60_000) {
+    return cached;
+  }
+  if (refreshing) return refreshing;
+
+  refreshing = (async () => {
+    // 源①：内存缓存里的 refresh token
+    if (cached?.refreshToken) {
+      try {
+        const next = await refreshQoderToken(cached.refreshToken);
+        cached = next;
+        console.log(`[qoder] token 已刷新（有效期至 ${new Date(next.expiresAt).toISOString()}）`);
+        return next;
+      } catch (e: any) {
+        console.warn(`[qoder] 缓存的 refresh token 刷新失败（${e.message}），改用 .env QODER_KEYS…`);
+      }
+    }
+    // 源②：.env QODER_KEYS（pnpm log-in:qoder 备份的 refresh token，自举）
+    const rt = readEnvValue('QODER_KEYS');
+    if (rt) {
+      try {
+        const next = await refreshQoderToken(rt);
+        cached = next;
+        console.log(`[qoder] 已用 QODER_KEYS 自举刷新（有效期至 ${new Date(next.expiresAt).toISOString()}）`);
+        return next;
+      } catch (e: any) {
+        console.warn(`[qoder] QODER_KEYS 刷新也失败: ${e.message}`);
+      }
+    }
+    throw new Error('无可用 Qoder 凭据（refresh token 均失效或缺失），请运行 pnpm log-in:qoder 网页登录');
+  })().finally(() => { refreshing = null; });
+
+  return refreshing;
+}
+
+/** 强制刷新一次（log-in:qoder 用：验证刷新链 + 拿到轮换后的 refresh token） */
+export async function forceRefreshQoder(): Promise<QoderTokenState> {
+  if (!cached?.refreshToken) {
+    throw new Error('尚未采纳登录凭据，无法验证刷新链');
+  }
+  const next = await refreshQoderToken(cached.refreshToken);
+  cached = next;
+  return next;
+}
+
+/** 采纳外部获取的凭据（网页设备授权登录用） */
+export function adoptQoderCredential(state: QoderTokenState): void {
+  cached = state;
+}
+
+/** 初始化凭据管理（启动时调用：只做凭据来源诊断，不发起网络请求） */
+export function initQoderTokenManager(): void {
+  const rt = readEnvValue('QODER_KEYS');
+  if (rt) {
+    console.log('[qoder] 已检测到 .env QODER_KEYS（网页登录凭据，运行时按需刷新）');
+  } else {
+    console.warn('[qoder] 未检测到 Qoder 凭据，请先运行 pnpm log-in:qoder 完成网页登录');
+  }
 }

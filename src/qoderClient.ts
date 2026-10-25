@@ -4,7 +4,7 @@
  * 与 qwenwork 的差异：
  * - host 为 api3.qoder.sh（目录在 /algo/api/v2/model/list）
  * - business.product = qoder，且 body 必须带 agent_id（缺省 agent_common）
- * - 凭据来自 Qoder App 的 auth.v1.dat（只读）
+ * - 凭据来自自包含网页登录（openapi.qoder.sh 设备授权，qoderAuth.ts 自持轮换）
  */
 
 import { qoderSettings } from './qoderConfig';
@@ -77,6 +77,6 @@ export async function forwardChatCompletions(
     // "None flow nodes found for router agent_router"（实测 qwenwork 不需要该字段）。
     bodyDefaults: { agent_id: 'agent_common' },
     getToken: getQoderToken,
-    authErrorMessage: `无可用 Qoder token（请先登录 Qoder App，或用 QODER_OAUTH_TOKEN_PATH 指定 auth.v1.dat）`,
+    authErrorMessage: '无可用 Qoder token（请先运行 pnpm log-in:qoder 完成网页登录）',
   });
 }

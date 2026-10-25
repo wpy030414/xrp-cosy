@@ -1,11 +1,14 @@
 {
-  "name": "xrl-router-plugin-qwenwork",
-  "description": "一个「千问办公」模型反向代理服务，需要配合 XRL Router 使用。",
+  "name": "xrp-cosy",
+  "version": "0.6.0",
+  "private": true,
+  "description": "xrp-cosy — qwenwork / qoder 双通道的 xrl-router 插件：仅支持自包含网页 OAuth 登录的 Cosy 签名桥接",
   "scripts": {
     "log-in": "tsx scripts/log-in.ts",
     "serve": "tsx src/index.ts",
     "log-in:qoder": "tsx scripts/log-in-qoder.ts",
-    "serve:qoder": "tsx src/qoderIndex.ts"
+    "serve:qoder": "tsx src/qoderIndex.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.8",

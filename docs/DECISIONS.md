@@ -3,7 +3,7 @@
 > 本文件记录项目关键设计决策背后的**历史原因**，防止架构漂移。
 > 每条决策回答的是「为什么」而非「怎么做」。
 
-版本：0.7.0 | 最后更新：2026-10-20
+版本：0.8.0 | 最后更新：2026-10-25
 
 ---
 
@@ -239,6 +239,8 @@
 **决策**：删除千问办公 App 链路，凭据来源收敛为**两源**（内存缓存 → `.env QWEN_KEYS`），两者都由 `pnpm log-in` 网页 device-flow 产出：
 - `src/auth.ts`：删除 `decryptAuthFile()` / `encryptAuthFile()` / `startAuthFileWatch()` / `initTokenManager()` 与 `QwenTokenState.raw`
 - `src/safeStorage.ts`：删除 `encryptSafeStorageJson()`（写回能力随 App 一起消失），模块收窄为**仅 qoder 通道只读解密**
+
+> ⚠️ **后续**：`src/safeStorage.ts` 已随 D-17（qoder 改为自包含网页登录）整体删除，仓库不再包含任何 Electron safeStorage 解密代码。
 - `src/config.ts`：删除 `qwenOauthTokenPath` / `qwenUserDataDir` / `qwenKeychainService` / `qwenKeychainAccount` 及对应 4 个环境变量
 - 删除 `scripts/log-in-app.ts`（`pnpm log-in:app`）与 `docs/specs/capture-key-qwenwork.md`
 - `QWEN_IDENTITY=biz` 的诊断/派生链不受影响：派生始终用设备流根凭据
@@ -249,6 +251,41 @@
 `pnpm serve` 在无 App 的机器上正常启动并注册；本机 `auth-v2.dat` 本就不存在，此前一直是「缺文件 → 静默跳到下一源」路径，功能等价。
 
 ---
+
+---
+
+## D-17: 为什么更名 xrp-cosy，并让 qoder 也改成自包含网页登录？
+
+**背景**：项目家族统一为 `xrp-*` 命名，本仓库定位为 **Cosy 协议族**（qwenwork / qoder 共用签名链）的双通道插件，远程仓库已更名为 `xrp-cosy`。与此同时，产品边界收敛为一条硬约束：**仅支持自包含网页 OAuth 登录**。
+
+**问题**：
+- D-16 之后 qwenwork 已无 App 依赖，但 qoder 仍是唯一例外：只读 `auth.v1.dat`（Electron safeStorage 解密），refresh token 轮换权归 Qoder App
+- 这条支路把「能否部署」绑定在「本机是否装着 Qoder App 并已登录」，且需要 Keychain/DPAPI 解密、文件监听等一整套平台相关机制
+- 与「仅自包含网页 OAuth」直接冲突，也让两条通道的凭据模型不对称（一个自持轮换、一个只读寄生）
+
+**可行性验证**（2026-10-25，在线探活 + 公开逆向资料交叉验证）：
+- 国际区设备授权入口：`https://qoder.com/device/selectAccounts?challenge&challenge_method=S256&nonce&client_id&machine_id`
+  → 实测 HTTP 302 跳转 `qoder.com/users/sign-in?oauth_callback=…`（登录页托管，插件不经手口令）
+- 换票轮询：`GET https://openapi.qoder.sh/api/v1/deviceToken/poll?nonce&verifier&challenge_method=S256`
+  → 未知 nonce 实测 HTTP 404 `{"errorCode":"NotFound"}`（等待授权语义）
+- 刷新：`POST https://openapi.qoder.sh/api/v1/deviceToken/refresh`（`drt-` refresh token，轮换式）
+- 常量与参数差异（国际版）：`client_id=e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb`、nonce 为 32-hex、**不传** redirect_uri
+- 交叉来源：`shuishuipingan/qoder2api-hub`（双区常量表、PKCE、poll/refresh）、`lidge-jun/opencodex`（Qoder CN OAuth provider）、`Liki4/qodercli2api`（PKCE / deviceToken / jobToken 逆向记录）
+
+**决策**：
+1. 项目更名 `xrp-cosy`（`package.json` / README / AGENTS / docs）；xrl-router 的 `plugin_id` 保持 `plugin-qwenwork` / `plugin-qoder`，避免破坏既有 Router 配置
+2. qoder 登录改为自包含网页设备授权：`src/qoderDeviceLogin.ts`（PKCE S256 + nonce + machineId + poll + userinfo）
+3. `src/qoderAuth.ts` 从「只读拾取」重写为「自持轮换」：两源 fallback（内存缓存 → `.env QODER_KEYS`），刷新后轮换值同步 `.env`
+4. `scripts/log-in-qoder.ts` 从「只读诊断」改为真实登录入口（`--status` 保留为只读诊断）
+5. 删除 `src/safeStorage.ts`，仓库不再包含任何 Electron safeStorage 解密代码；不读取、不写回 `auth.v1.dat`
+6. 新增 `src/openBrowser.ts`，把两通道共用的「打开系统浏览器」从 `deviceLogin.ts` 下沉
+
+**代价（已知取舍）**：
+- 失去 App 兜底：`.env QODER_KEYS` 丢失或 refresh token 全部作废时，只能重新走网页登录
+- refresh token 轮换权收归插件：同一份 `.env` 不应被多个插件实例并发使用（与 qwenwork 相同的单进程假设）
+- 官方设备授权端点若变更，需要同步更新 `QODER_*` 配置；参数已全部环境变量化以便快速改道
+
+**证据**：`pnpm typecheck` 全绿（src + scripts）；`pnpm log-in:qoder --no-browser` 实测可生成授权 URL 并持续轮询（未授权时保持 pending）；`openapi.qoder.sh` 未知 nonce 返回 404 NotFound。
 
 ---
 

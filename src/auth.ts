@@ -11,10 +11,8 @@
  * 已随 App 支持一并移除（见 docs/DECISIONS.md D-16）。
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
-import dotenv from 'dotenv';
 import { settings } from './config';
+import { readEnvValue, writeEnvValue } from './envStore';
 
 export interface QwenUserInfo {
   uid: string;
@@ -70,25 +68,13 @@ export async function refreshDeviceToken(refreshToken: string): Promise<QwenToke
 
 /** 从 .env 读 QWEN_KEYS（pnpm log-in 备份的 refresh token，可作自举源） */
 function loadRefreshTokenFromEnv(): string | null {
-  try {
-    const envPath = path.resolve(process.cwd(), '.env');
-    const parsed = dotenv.parse(fs.readFileSync(envPath, 'utf8'));
-    const v = parsed.QWEN_KEYS?.trim();
-    return v || null;
-  } catch { return null; }
+  return readEnvValue('QWEN_KEYS');
 }
 
 /** 同步 .env 的 QWEN_KEYS（refresh token 轮换后落盘：重启/换进程可自举续命） */
 function syncEnvRefreshToken(refreshToken: string): void {
-  try {
-    const envPath = path.resolve(process.cwd(), '.env');
-    const lines = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8').split('\n') : [];
-    const idx = lines.findIndex((l) => l.startsWith('QWEN_KEYS='));
-    if (idx >= 0) lines[idx] = `QWEN_KEYS=${refreshToken}`;
-    else lines.push(`QWEN_KEYS=${refreshToken}`);
-    fs.writeFileSync(envPath, lines.filter((l, i) => !(l === '' && i === lines.length - 1)).join('\n') + '\n', { mode: 0o600 });
-  } catch (e: any) {
-    console.warn(`[qwenwork] QWEN_KEYS 同步失败（不影响运行）: ${e.message}`);
+  if (!writeEnvValue('QWEN_KEYS', refreshToken)) {
+    console.warn('[qwenwork] QWEN_KEYS 同步失败（不影响运行）：.env 未通过 git-ignore 守卫');
   }
 }
 

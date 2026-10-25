@@ -15,10 +15,13 @@
  *   deviceToken/refresh 续期；与 App 已有链路服务端互不失效（两条独立链）
  */
 
-import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import { settings } from './config';
 import { readEnvValue, writeEnvValue } from './envStore';
+import { openInBrowser } from './openBrowser';
+
+// 兼容既有调用方：浏览器打开能力已下沉到 openBrowser.ts，跨通道共用
+export { openInBrowser };
 
 const PKCE_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
 const REDIRECT_URI = 'qwenwork-cn://';
@@ -143,28 +146,6 @@ export function buildAuthUrl(h: DeviceLoginHandles, loginHint?: string): string 
   u.searchParams.set('redirect_uri', REDIRECT_URI);
   if (loginHint) u.searchParams.set('login_hint', loginHint);
   return u.toString();
-}
-
-/** 尽力打开系统浏览器（best-effort：失败返回 false，调用方应同时打印 URL 兜底） */
-export function openInBrowser(url: string): boolean {
-  try {
-    let child;
-    if (process.platform === 'win32') {
-      // cmd 的 start 中 & 是命令分隔符，URL 必须显式加引号且禁用 Node 的自动转义，
-      // 否则 URL 会在第一个 & 处被截断（实测：query 只剩 challenge= 段）
-      child = spawn('cmd.exe', ['/c', 'start', '', `"${url}"`], {
-        detached: true, stdio: 'ignore', windowsVerbatimArguments: true,
-      });
-    } else if (process.platform === 'darwin') {
-      child = spawn('open', [url], { detached: true, stdio: 'ignore' });
-    } else {
-      child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
-    }
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
